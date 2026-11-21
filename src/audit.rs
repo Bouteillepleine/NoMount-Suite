@@ -301,11 +301,25 @@ fn live_rules() -> Option<LiveRules> {
         .collect();
     all_targets.sort();
     all_targets.dedup();
-    let dirs = rules
+    // Classified by what the target IS, not by the rule's kind.
+    //
+    // Both directory-inode checks took their subjects from VirtualDir rules alone, so an
+    // Inject rule whose target is a directory - the engine serving a real directory as an
+    // injected one - was never band-checked and never collision-checked as a directory.
+    // lstat, not metadata: a symlink to a directory carries its own inode and belongs in
+    // the file population, which is the distinction the inode checks already make.
+    let mut dirs: Vec<PathBuf> = rules
         .iter()
-        .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
+        .filter(|r| {
+            r.kind == crate::nm::LiveKind::VirtualDir
+                || (r.uid == 0
+                    && r.kind == crate::nm::LiveKind::Inject
+                    && fs::symlink_metadata(&r.target).is_ok_and(|m| m.is_dir()))
+        })
         .map(|r| r.target.clone())
         .collect();
+    dirs.sort();
+    dirs.dedup();
     let inject_sources = rules
         .iter()
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)

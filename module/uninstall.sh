@@ -9,6 +9,21 @@ case "$0" in
     */*) MODDIR="${0%/*}" ;;
     *)   MODDIR=/data/adb/modules/meta-nomount ;;
 esac
+# service.sh links /data/adb/{ksu,ap}/bin/nm -> $MODDIR/bin/$ABI/nm on every boot so
+# NoMount-aware installers can find the CLI. Nothing removed them, so an uninstall left two
+# dangling symlinks in the manager's own bin directory: a path that exists, resolves to
+# nothing, and cannot be executed. Only the ones pointing into this module - a link to
+# something else was not ours to delete.
+for _nmd in /data/adb/ksu/bin /data/adb/ap/bin; do
+    [ -L "$_nmd/nm" ] || continue
+    case "$(readlink "$_nmd/nm" 2>/dev/null)" in
+        /data/adb/modules/meta-nomount/* | /data/adb/modules_update/meta-nomount/* | "$MODDIR"/*)
+            rm -f "$_nmd/nm" 2>/dev/null
+            ;;
+    esac
+done
+unset _nmd
+
 _bak=/data/adb/nomount.bak
 # Same gate as lib.sh's nmlog: the boot log always, /dev/kmsg only on request.
 _nmlog() {
@@ -136,9 +151,22 @@ elif [ -d /data/adb/nomount ]; then
     unset _kept _lost
 fi
 
-if [ "${_wipe_ok:-1}" = 0 ]; then
+if [ "${_wipe_ok:-1}" = 0 ] && [ ! -f "$MODDIR/remove" ]; then
     _nmlog "keeping /data/adb/nomount: ${_keep_why:-the stash failed, so wiping it would destroy the only copy}"
     rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount 2>/dev/null
 else
+    # On a genuine `remove` there is no next boot to retry anything, so honouring
+    # _wipe_ok here left /data/adb/nomount behind for good -- an uninstall that silently
+    # kept its state directory, with a reason ("the next boot retries it") that could
+    # never come true. Keep the one thing that record is for, where an uninstalled module
+    # cannot reach it, then wipe.
+    if [ "${_wipe_ok:-1}" = 0 ] && [ -s /data/adb/nomount/binds.list ]; then
+        if cp -p /data/adb/nomount/binds.list \
+                /data/local/tmp/nomount-unfinished-binds.list 2>/dev/null; then
+            _nmlog "⚠ ${_keep_why:-state could not be stashed}; uninstalling anyway, and binds.list is at /data/local/tmp/nomount-unfinished-binds.list - those source files may still carry a ROM SELinux label"
+        else
+            _nmlog "⚠ ${_keep_why:-state could not be stashed}; uninstalling anyway, and binds.list could NOT be copied out - any source file still carrying a ROM label is unrecorded"
+        fi
+    fi
     rm -rf /data/adb/nomount
 fi

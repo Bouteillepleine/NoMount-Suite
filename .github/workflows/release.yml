@@ -124,6 +124,15 @@ jobs:
             hit && /^## / {exit}
             hit && NF == 0 && !started {next}
             hit {started = 1; print}' CHANGELOG.md)
+          # Fatal, not a warning. tag.yml makes this exact requirement fatal before it ever
+          # calls here, but release.yml is also triggerable directly by pushing a v* tag,
+          # and on that path an empty body only warned -- so a tag pushed by hand published
+          # a release with no notes at all, past the one gate that exists to stop it. A
+          # published version is immutable, so the only remedy is another version bump.
+          if [ -z "$body" ] && [ "${DRY_RUN:-}" != 'true' ]; then
+            echo "::error::CHANGELOG.md has no section for $TAG - refusing to publish a release with no notes"
+            exit 1
+          fi
           if [ -z "$body" ]; then
             echo "::warning::CHANGELOG.md has no section for $TAG - the release notes will be empty"
           fi

@@ -28,6 +28,11 @@ _J=$(nproc 2>/dev/null)
 case "$_J" in ''|*[!0-9]*) _J=4 ;; esac
 J=$((_J * 2))
 unset _J
+# Clamp HERE, before XARGS_P is built from it. The two lines used to sit after that, so
+# nothing read J again and the parallelism actually used was always the unclamped
+# nproc * 2 -- the clamp was dead.
+[ "$J" -gt 24 ] && J=24
+[ "$J" -lt 4 ] && J=4
 
 # -P is not in POSIX xargs: toybox has never had it and busybox only since 1.31 with
 # FEATURE_XARGS_SUPPORT_PARALLEL. Where it is missing the usage error failed the whole
@@ -39,9 +44,6 @@ if ! printf 'x\0' | xargs -0 -P 2 -n1 true >/dev/null 2>&1; then
     XARGS_P=""
     nmlog "xargs has no -P here; scanning serially (slower, same result)"
 fi
-[ "$J" -gt 24 ] && J=24
-[ "$J" -lt 4 ] && J=4
-
 export INV
 PKGS=$(pm list packages -3 -f 2>/dev/null | sed 's/^package://')
 if [ -z "$PKGS" ]; then

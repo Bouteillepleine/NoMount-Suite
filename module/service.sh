@@ -285,16 +285,23 @@ nm_watch() {
     return 0
 }
 
+# The shared gate carries no uidwatch.sh test. The two handlers are independent --
+# uidwatch.sh re-applies the hide list on package changes, checkwatch.sh exists only so the
+# WebUI can run a check outside its own seccomp context -- and gating the whole block on
+# uidwatch.sh meant a build shipping only checkwatch.sh silently started no watcher at all,
+# past its own `[ -f ]` test. Each spawn tests for its own handler.
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
-   && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
+   && command -v inotifyd >/dev/null 2>&1; then
     _watchers=""
-    nm_watch "$MODDIR/uidwatch.sh" /data/system cewDMmynd "hide-list-package" \
-        && _watchers="$_watchers $NM_WATCH_PID=hide-list-package"
-    # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
-    # off, so turning it on takes effect without a reboot.
-    if [ -d /data/adb/ksu ]; then
-        nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu cewDMmynd "KernelSU-DenyList" \
-            && _watchers="$_watchers $NM_WATCH_PID=KernelSU-DenyList"
+    if [ -f "$MODDIR/uidwatch.sh" ]; then
+        nm_watch "$MODDIR/uidwatch.sh" /data/system cewDMmynd "hide-list-package" \
+            && _watchers="$_watchers $NM_WATCH_PID=hide-list-package"
+        # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
+        # off, so turning it on takes effect without a reboot.
+        if [ -d /data/adb/ksu ]; then
+            nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu cewDMmynd "KernelSU-DenyList" \
+                && _watchers="$_watchers $NM_WATCH_PID=KernelSU-DenyList"
+        fi
     fi
     # Lets the WebUI have a check run OUTSIDE its own context. Its exec inherits the
     # manager app's seccomp filter, which denies setgroups, so four device checks cannot
@@ -462,9 +469,15 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     else
         _rphr="$_rules rules · $_rro RRO$_wof"
     fi
-    KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "$_mark $_rphr · $_mstate - $_health$_muc" \
-        >/dev/null 2>&1
-    nmlog "card refreshed ($_rphr, $_mstate, $_health$_mul)"
+    # Timed, like the identical call in metamount.sh: it is a description card and is never
+    # worth hanging on. `env` because nmto execs "$@", so a VAR=val prefix would be taken
+    # as the command name. This copy was the one left untimed.
+    if nmto 10 env KSU_MODULE=meta-nomount ksud module config set --temp \
+            override.description "$_mark $_rphr · $_mstate - $_health$_muc" \
+            >/dev/null 2>&1; then
+        nmlog "card refreshed ($_rphr, $_mstate, $_health$_mul)"
+    else
+        nmlog "⚠ could not write the module description card (ksud slow or refused)"
+    fi
 fi
 exit 0
