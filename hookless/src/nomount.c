@@ -4394,7 +4394,18 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
  * only grows. Taking the next one is what overlayfs does for its own directories, and it
  * never hands that number to anything else. dmax above the counter means the numbers on
  * this mount are not counter-issued. */
-static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di)
+/* `local_max` is the highest inode among the siblings of the directory being placed, not
+ * the partition-wide dmax.
+ *
+ * The question this guard asks is "are the numbers on THIS mount counter-issued", and dmax
+ * cannot answer it: dmax is measured over the partition SEED subtree, which spans other
+ * filesystems and other overlay mounts, so on a mount whose own directories are perfectly
+ * counter-issued it is routinely far above this sb's counter -- and the reservation was
+ * refused exactly where it was correct. Measured on a CPH2747: /product/priv-app is its own
+ * overlay mount whose dirs run 2..74, the partition dmax was ~384, so this returned 0 and
+ * placement fell through to the partition band and produced 201 and 202.
+ */
+static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di, u64 local_max)
 {
     u64 c = 0;
 #ifdef NM_OVL_LAST_INO
@@ -4407,7 +4418,7 @@ static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di)
     if (sb->s_magic == OVERLAYFS_SUPER_MAGIC && sb->s_dev == di->dev) {
         struct ovl_fs *ofs = sb->s_fs_info;
 
-        if (di->dmax && di->dmax <= (u64)atomic_long_read(&ofs->last_ino))
+        if (local_max && local_max <= (u64)atomic_long_read(&ofs->last_ino))
             c = (u64)atomic_long_inc_return(&ofs->last_ino);
     }
     path_put(&p);
@@ -4461,7 +4472,50 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
      * partition's used-inode set the only number that cannot collide is one above every
      * inode. That set is di->used; this path is what remains when it is missing or full.
      */
-    c = nm_ovl_reserve_dir_ino(di);
+    /* The LOCAL sibling range first, when di->used is there to make it safe.
+     *
+     * In band partition-wide is not in band locally. dmin..dmax below is measured over the
+     * partition seed subtree, so a number inside it can still sit far above the siblings an
+     * app actually sees: on a CPH2747 /product/priv-app ran 3..74 while the two injected
+     * directories got 201 and 202, and `find -maxdepth 1 -type d -inum +100` returned
+     * exactly those two. The band closed the 89.7M tell and left a smaller one.
+     *
+     * This is NOT the 2026-11-08 gap-fit that was reverted. That tested candidates against
+     * `pop` alone -- a sample of this directory's DIRECT entries -- so a number free here
+     * was taken one level down and two names ended up sharing (st_dev, st_ino). The
+     * difference is di->used: every inode the partition scan saw plus every number already
+     * handed out. A candidate clearing both is in band locally AND unused partition-wide,
+     * which the earlier attempt had no way to establish.
+     */
+    if (di->used && pop->n > 1) {
+        u64 lo = pop->v[0], hi = pop->v[pop->n - 1];
+
+        if (hi > lo + 1) {
+            u64 span = hi - lo - 1;
+            u64 lim = span < 4096 ? span : 4096;
+            u64 i;
+
+            for (i = 0; i < lim; i++) {
+                c = lo + 1 + (spread + i) % span;
+                if (nm_used_test(di->used, c) || nm_ino_taken(pop, c))
+                    continue;
+                nm_used_add(di->used, c);
+                nm_debug("inoplace: dev=%u:%u local %llu..%llu -> ino=%llu (try %llu)\n",
+                         MAJOR(pop->dev), MINOR(pop->dev),
+                         (unsigned long long)lo, (unsigned long long)hi,
+                         (unsigned long long)c, (unsigned long long)i);
+                return nm_ino_take(pop, c);
+            }
+        }
+    }
+
+    /* A contiguous local population has no gap to fit into -- at boot the counter has
+     * barely moved, so this is the common case, not the exception. The next number the
+     * mount's own counter would issue is then the best answer available: it is what
+     * overlayfs hands its own new directories, so "the only entry above the stock max" is
+     * equally true of any directory created after ours, and it cannot collide.
+     */
+    c = nm_ovl_reserve_dir_ino(di, pop->n ? pop->v[pop->n - 1] : 0);
     if (c) {
         nm_used_add(di->used, c);
         nm_debug("inoplace: dev=%u:%u overlay counter -> ino=%llu\n",
