@@ -36,7 +36,9 @@
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/kprobes.h>
+#include <linux/sched/task_stack.h>
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/path.h>
@@ -115,6 +117,14 @@ struct nm_gp_ctx {
 	bool hide;
 };
 
+/* The socket probe needs one more field than the others and is a COLD probe, so it gets
+ * its own context: nm_gp_ctx is shared by the hot probes at maxactive 512, where every
+ * extra byte is multiplied by that. */
+struct nm_gp_sock_ctx {
+	bool hide;
+	int *perr;
+};
+
 struct nm_gp_upa_ctx {
 	struct path *out;
 };
@@ -142,31 +152,72 @@ static int nm_gp_stat_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  * starts one byte past sun_path, and its length is what is left of addr_len
  * after the header and that leading NUL - the same arithmetic the in-tree
  * patch does at the unix_stream_connect() call site. */
+/* unix_find_other() reports failure two different ways, and writing the wrong one is an
+ * oops rather than a missed cloak.
+ *
+ * Read from the kernel sources, per release tag:
+ *
+ *   <= 5.16  static struct sock *unix_find_other(struct net *, struct sockaddr_un *sunname,
+ *                                                int len, int type, unsigned int hash,
+ *                                                int *error)
+ *            fails with `*error = err; return NULL;` and every caller tests `if (!other)`.
+ *   >= 5.17  static struct sock *unix_find_other(struct net *, struct sockaddr_un *sunaddr,
+ *                                                int addr_len, int type)
+ *            fails with ERR_PTR() and every caller tests `if (IS_ERR(other))`.
+ *
+ * So an ERR_PTR written into x0 on a 5.10 or 5.15 GKI passes `!other`, and the caller
+ * dereferences 0xfffffffffffffff3. A NULL written on 5.17+ passes `IS_ERR()` and the caller
+ * dereferences NULL. One handler cannot serve both.
+ *
+ * On the old convention `int *error` is the SIXTH argument, so x5 under AAPCS64, captured at
+ * entry because the return handler sees a different register state.
+ *
+ * The object_is_on_stack() test is not paranoia about the source: it covers a vendor who
+ * backported the refactor into a kernel still calling itself 5.15, where x5 would hold an
+ * unrelated leftover value. A caller's `&err` is a local, so it is always on the current
+ * task's stack; anything else means we do not understand this kernel, and then we leave the
+ * return alone. Failing open on one socket lookup is a cost; crashing is not.
+ */
 static int nm_gp_sock_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct nm_gp_sock_ctx *ctx = (struct nm_gp_sock_ctx *)ri->data;
 	struct sockaddr_un *sunaddr = (struct sockaddr_un *)regs->regs[1];
 	int addr_len = (int)regs->regs[2];
 	int namelen = addr_len - (int)offsetof(struct sockaddr_un, sun_path) - 1;
 
 	ctx->hide = sunaddr && namelen > 0 && !sunaddr->sun_path[0] &&
 		    ghost_abstract_hidden(sunaddr->sun_path + 1, namelen);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+	ctx->perr = (int *)regs->regs[5];
+#else
+	ctx->perr = NULL;
+#endif
 	return 0;
 }
 
 static int nm_gp_sock_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct nm_gp_sock_ctx *ctx = (struct nm_gp_sock_ctx *)ri->data;
 	struct sock *sk;
 
 	if (!ctx->hide)
 		return 0;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+	if (!ctx->perr || !object_is_on_stack(ctx->perr))
+		return 0;
+#endif
+
 	sk = (struct sock *)regs->regs[0];
 	if (!IS_ERR_OR_NULL(sk))
 		sock_put(sk);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+	*ctx->perr = -ECONNREFUSED;
+	regs->regs[0] = 0;
+#else
 	regs->regs[0] = (unsigned long)ERR_PTR(-ECONNREFUSED);
+#endif
 	return 0;
 }
 
@@ -334,6 +385,34 @@ static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* An argument-shaped failure, i.e. one the caller would have got whatever path it named.
+ *
+ * Rewriting these to -ENOENT is itself the tell: an app that passes a bad flag, an
+ * over-long name or a symlink loop gets "no such file" from us where every other path on
+ * the device answers EINVAL, ENAMETOOLONG or ELOOP. The errnos NOT listed here are the
+ * ones that only arise when the path EXISTS -- EACCES, EPERM, EROFS, EISDIR, ENOTDIR --
+ * and leaving those alone would be the opposite leak, so they still become ENOENT.
+ */
+static bool nm_gp_errno_is_about_the_call(long err)
+{
+	switch (err) {
+	case -EINVAL:
+	case -ENAMETOOLONG:
+	case -ELOOP:
+	case -EFAULT:
+	case -EMFILE:
+	case -ENFILE:
+	case -ENOMEM:
+	case -EINTR:
+	case -ERESTARTSYS:
+	case -EOPNOTSUPP:
+	case -EOVERFLOW:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int nm_gp_open_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
@@ -343,6 +422,9 @@ static int nm_gp_open_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 
 	file = (struct file *)regs->regs[0];
+	if (IS_ERR(file) && nm_gp_errno_is_about_the_call(PTR_ERR(file)))
+		return 0;
+
 	if (!IS_ERR_OR_NULL(file))
 		fput(file);
 
@@ -431,7 +513,7 @@ static struct kretprobe nm_gp_krp[] = {
 		.kp.symbol_name = "unix_find_other",
 		.entry_handler  = nm_gp_sock_entry,
 		.handler        = nm_gp_sock_ret,
-		.data_size      = sizeof(struct nm_gp_ctx),
+		.data_size      = sizeof(struct nm_gp_sock_ctx),
 		.maxactive      = NM_GP_MAXACTIVE_COLD,
 	},
 };

@@ -234,11 +234,24 @@ static int nm_ph_mincore_entry(struct kretprobe_instance *ri, struct pt_regs *re
 	return 0;
 }
 
+/* Only a SUCCESSFUL mincore() is rewritten.
+ *
+ * Rewriting every return meant an unaligned start -- which stock answers -EINVAL for,
+ * before it looks at any vma -- came back -ENOMEM from us, and that difference is one
+ * syscall to measure. A stock failure here is either argument-shaped (EINVAL, EFAULT) or
+ * already says "not mapped" (ENOMEM), so none of them reveals the hidden vma and all of
+ * them are better left exactly as the kernel produced them.
+ *
+ * ⚠ This cannot make mincore() consistent, only quieter. The body fills the caller's
+ * residency vector BEFORE returning, and a kretprobe handler cannot copy_to_user() -- it
+ * must not fault -- so an app that ignores the return value still reads true residency for
+ * the hidden range. Closing that needs a guard that runs before the body, not after it.
+ */
 static int nm_ph_mincore_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_ph_ctx *ctx = (struct nm_ph_ctx *)ri->data;
 
-	if (ctx->hide)
+	if (ctx->hide && (long)regs->regs[0] == 0)
 		regs->regs[0] = (unsigned long)(long)-ENOMEM;
 	return 0;
 }
