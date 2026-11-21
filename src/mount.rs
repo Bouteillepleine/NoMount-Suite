@@ -1999,6 +1999,54 @@ mod tests {
         // Counted, not matched: commitchanges() carries upstream's identical seek on the
         // WRITE path, so `contains` passes even with the local change gone. Two is patched,
         // one is reverted.
+        // release.yml extracts the CHANGELOG section for the tag it is publishing and now
+        // REFUSES to publish without one, so a bump whose newest heading does not match
+        // Cargo.toml fails the release AFTER tag.yml has pushed the tag -- and a published
+        // version is immutable, so the only remedy is another bump. Caught here instead,
+        // before the push. docs/changelog-latest.md is deliberately NOT compared: CI writes
+        // it from these same notes after the release, so between a bump and its release the
+        // two differ by design and gating them would fail every bump commit.
+        const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+        let newest = CHANGELOG
+            .lines()
+            .find_map(|l| l.strip_prefix("## v"))
+            .and_then(|l| l.split_whitespace().next())
+            .expect("CHANGELOG.md has no `## v<version>` heading for release.yml to extract");
+        assert_eq!(
+            newest,
+            env!("CARGO_PKG_VERSION"),
+            "CHANGELOG.md's newest section is v{} but Cargo.toml says {}. Pushing this bumps \
+             the tag, and release.yml then refuses to publish with no notes for it - with the \
+             version number already burnt",
+            newest,
+            env!("CARGO_PKG_VERSION")
+        );
+
+        // .cargo/config.toml pins a linker per target; package.sh's ABI_TARGET map is the
+        // list of ABIs actually shipped. Nothing reconciled the two, so adding an ABI to
+        // packaging without a linker fails only on the first machine that cross-builds it.
+        // Asserted in one direction on purpose: spare targets in config.toml cost nothing
+        // because they apply only if you build them, but a shipped one with no linker does.
+        const CARGO_CFG: &str = include_str!("../.cargo/config.toml");
+        const PKG_SH: &str = include_str!("../scripts/package.sh");
+        let mut shipped = 0;
+        for raw in PKG_SH.lines() {
+            let t = raw.trim();
+            let Some((abi, target)) = t.strip_prefix('[').and_then(|r| r.split_once("]=")) else {
+                continue;
+            };
+            if !target.contains("-linux-android") {
+                continue;
+            }
+            shipped += 1;
+            assert!(
+                CARGO_CFG.contains(&format!("[target.{target}]")),
+                "package.sh ships ABI {abi} as {target}, but .cargo/config.toml configures no \
+                 linker for it"
+            );
+        }
+        assert!(shipped > 0, "found no ABI_TARGET entry in package.sh, so this proved nothing");
+
         const SSTRIP_C: &str = include_str!("../userspace/tools/sstrip/sstrip.c");
         assert_eq!(
             SSTRIP_C.matches("fseek(thefile, ehdr.e_phoff, SEEK_SET)").count(),

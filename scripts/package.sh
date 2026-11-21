@@ -17,6 +17,11 @@ LKM_EXPECT="${NM_LKM_EXPECT:-8}"
 
 CURRENT_VERSION="$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 VERSION=""
+# Set by --version, which is how CI packages a release (build.yaml: `scripts/package.sh
+# --version "$VER"`). VERSION itself is overwritten unconditionally further down, so the
+# flag's own state has to be kept separately. Used to decide whether a missing ko-loader
+# is fatal: in a release it is, in a scratch build it is the developer's problem.
+VERSION_GIVEN=false
 BUILD=false
 CLEAN=false
 DEPLOY=false
@@ -25,7 +30,7 @@ DEPLOY_PROFILE="debug"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
+        --version) VERSION="$2"; VERSION_GIVEN=true; shift 2 ;;
         --build)   BUILD=true; shift ;;
         --clean)   CLEAN=true; shift ;;
         --deploy)  DEPLOY=true; shift ;;
@@ -518,6 +523,21 @@ package_zip() {
     if [ -n "$loader_src" ]; then
         install -m 0755 "$loader_src" "$staging/loader"
         echo "    loader: $(basename "$loader_src")"
+    elif [ "$VERSION_GIVEN" = true ]; then
+        # The .ko count above is fatal for the same reason, and this is the other half of
+        # it: without the loader a module built against a different point release cannot
+        # be made to insmod at all, which is the entire reason both zips carry it. A
+        # printed note let a release ship without it, and a published version is
+        # immutable. Only a RELEASE build is fatal -- a scratch `package.sh` with no
+        # --version has no CI step to have built the loader, and refusing there would
+        # just stop people packaging locally.
+        echo "fatal: no ko-loader to stage, and this is a release build (--version given)." >&2
+        echo "       Both zips carry it: it is the only thing that can load a .ko whose" >&2
+        echo "       vermagic does not match the running kernel. Build it first (see the" >&2
+        echo "       'Build ko-loader' step in .github/workflows/build.yaml) or package" >&2
+        echo "       without --version for a local zip." >&2
+        rm -rf "$staging"
+        exit 1
     else
         echo "    loader: none - module loading falls back to ksud insmod / insmod"
     fi

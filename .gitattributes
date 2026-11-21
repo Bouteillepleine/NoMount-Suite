@@ -23,11 +23,15 @@
 *.lock      text eol=lf
 *.yaml      text eol=lf
 *.yml       text eol=lf
-# `text eol=lf`, not `-text`. The kernel side ships an integration patch that
-# `apply_nomount_stack.sh` feeds to `patch -p1`, so a stray CRLF in it is a
-# failed build on a machine nobody can reproduce. `-text` stores bytes
-# verbatim; `text eol=lf` also NORMALISES on the way in, so a Windows editor
-# cannot introduce one. The old `-text` came from a kernel_patches/ tree that
-# no longer exists and left no .patch behind.
+# `text eol=lf`, not `-text`. hookless/patches/nomount_kernel_integration.patch is
+# fed to `patch -p1` by the compile matrix (.github/workflows/hookless-matrix.yml,
+# at --fuzz=3) and by hand per hookless/README.md, and the out-of-tree kernel
+# builders fetch it the same way -- so a stray CRLF in it is a failed build on a
+# machine nobody can reproduce. `-text` stores bytes verbatim; `text eol=lf` also
+# NORMALISES on the way in, so a Windows editor cannot introduce one.
+#
+# This comment used to justify the rule by naming `apply_nomount_stack.sh` and a
+# kernel_patches/ tree, neither of which exists in this repository -- so the
+# reasoning could not be checked against anything. The consumers above can be.
 *.patch     text eol=lf
 module.prop text eol=lf
