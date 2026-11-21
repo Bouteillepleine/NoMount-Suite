@@ -9,12 +9,21 @@
 #   adb push tests/statmount-check.sh /data/local/tmp/
 #   adb push statmount-probe /data/local/tmp/
 #   adb shell su -c 'sh /data/local/tmp/statmount-check.sh'
+#
+# Exits 0 PASS, 1 FAIL, 2 UNMEASURED. The three are deliberately distinct: this
+# script used to print its three measurements and compare none of them, and its
+# status was whatever `grep -c` last returned -- which is 1 when the count is 0,
+# so it exited non-zero on the CLEAN result and zero on a leak. It could not go
+# red for the thing it is named after.
 
 PROBE=${1:-/data/local/tmp/statmount-probe}
 BIN=${2:-/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount}
 
 [ "$(id -u)" = 0 ] || { echo "fatal: needs root"; exit 1; }
 [ -x "$PROBE" ] || { echo "fatal: no probe at $PROBE"; exit 1; }
+
+fail=0
+unmeasured=0
 
 echo "== kernel =="
 uname -r
@@ -27,14 +36,84 @@ grep -c '/adb/modules/' /proc/self/mountinfo 2>/dev/null
 
 echo
 echo "== as a hide-listed app uid (the guard's only caller) =="
-HID=$("$BIN" uid list 2>/dev/null | sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
+# A LIVE row only. `uid list` prints a "uid NNNNN" field for saved-but-not-applied
+# and engine-unreadable rows too, and taking the first row with any uid drove the
+# whole measurement against a uid no guard is installed for -- which then reports
+# clean because nothing was being hidden from it in the first place.
+HID=$("$BIN" uid list 2>/dev/null \
+	| grep -E 'uid [0-9]{4,}' \
+	| grep -v 'not applied' \
+	| grep -v 'unreadable' \
+	| grep -E 'live' \
+	| sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
 if [ -z "$HID" ]; then
-	echo "SKIP: no uid on the hide list, so nothing can be measured here."
-	echo "      Add one with: $BIN uid add <uid>"
-	exit 0
+	echo "UNMEASURED: no LIVE hide-list uid, so the guard has no caller to measure."
+	echo "            Add one with: $BIN uid add <uid>, then re-run."
+	exit 2
 fi
 echo "uid: $HID"
 chmod 755 "$PROBE"
-su "$HID" -c "$PROBE"
+hid_out=$(su "$HID" -c "$PROBE" 2>&1)
+hid_rc=$?
+printf '%s\n' "$hid_out"
 echo "-- that uid's mountinfo --"
-su "$HID" -c "grep -c /adb/modules/ /proc/self/mountinfo"
+hid_mi=$(su "$HID" -c "grep -c /adb/modules/ /proc/self/mountinfo" 2>/dev/null)
+echo "$hid_mi"
+
+echo
+echo "== verdict =="
+# The probe exits 1 on a leak and prints one verdict line; 0 covers clean, and also
+# the two "could not measure" cases, which are NOT passes.
+case "$hid_out" in
+*"verdict: clean"*)
+	echo "ok    statmount/listmount hand that uid no module-rooted mount"
+	;;
+*"verdict: not applicable"*)
+	echo "UNMEASURED: this kernel predates listmount, so there is nothing to hide"
+	unmeasured=1
+	;;
+*"verdict: unmeasured"*)
+	echo "UNMEASURED: the probe could not read the mount list for that uid"
+	unmeasured=1
+	;;
+*"verdict:"*)
+	echo "FAIL  the probe reported a leak for a hide-listed uid"
+	fail=1
+	;;
+*)
+	echo "FAIL  the probe printed no verdict at all (did it run?)"
+	fail=1
+	;;
+esac
+if [ "$hid_rc" -gt 1 ]; then
+	echo "FAIL  the probe exited $hid_rc for uid $HID"
+	fail=1
+fi
+
+# The cross-check this script's own header describes. mountinfo is the surface the
+# filter already blanks; statmount agreeing with it only means something when the
+# filter is in fact hiding something from this uid.
+case "$hid_mi" in
+'' | *[!0-9]*)
+	echo "UNMEASURED: could not count that uid's mountinfo rows"
+	unmeasured=1
+	;;
+0) ;;
+*)
+	echo "UNMEASURED: that uid still sees $hid_mi module row(s) in its own mountinfo,"
+	echo "            so statmount hiding them would not be the property under test"
+	unmeasured=1
+	;;
+esac
+
+echo
+if [ "$fail" != 0 ]; then
+	echo "RESULT: FAIL"
+	exit 1
+fi
+if [ "$unmeasured" != 0 ]; then
+	echo "RESULT: UNMEASURED (not a pass)"
+	exit 2
+fi
+echo "RESULT: PASS"
+exit 0

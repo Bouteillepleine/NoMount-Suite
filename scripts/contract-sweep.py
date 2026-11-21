@@ -166,6 +166,7 @@ PLACE = re.compile(r"\{[^{}]*\}")
 CONT = re.compile(r"\\\s*\n\s*")
 ANCHOR = re.compile(r"^\^|\$$")
 UNESC = re.compile(r"\\(.)")
+UNI = re.compile(r"\\u([0-9a-fA-F]{4})")
 META = re.compile(r"[\[\]()+*?|]")
 TESTMOD = re.compile(r"^#\[cfg\(test\)\]\s*\n\s*mod\b", re.M)
 
@@ -177,7 +178,11 @@ def needles():
             txt = read(rel)
         except OSError:
             continue
-        if rel.endswith(".html"):
+        # .js as well as .html. CONSUMER_FILES has globbed module/webroot/js/*.js since the
+        # page was split into parts, but a .js file matched none of these three arms and so
+        # contributed ZERO needles -- and index.html no longer carries any inline script, so
+        # the JS half of this sweep was empty while reporting itself covered.
+        if rel.endswith((".html", ".js")):
             for m in JS_CALL.finditer(txt):
                 out.append((rel, "js-call", m.group(2)))
             for m in JS_EQ.finditer(txt):
@@ -209,6 +214,11 @@ def haystack():
 
 
 def normalize(kind, n):
+    # JS source escapes the characters the producers emit literally: the WebUI looks for
+    # " · also covered by " where src/cli/handlers.rs prints " · also covered by ".
+    # Decoded here, before UNESC below would eat the backslash and leave "u00b7".
+    if kind.startswith("js-"):
+        n = UNI.sub(lambda m: chr(int(m.group(1), 16)), n)
     if kind in ("sh-grep", "js-regex"):
         n = ANCHOR.sub("", n)
         if META.search(n):

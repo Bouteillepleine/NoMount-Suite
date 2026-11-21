@@ -38,8 +38,10 @@ echo "== variant =="
 # precisely the build these tests get run against, because it is the only one you can
 # rmmod. The run then printed SKIP and exited 0, which reads as a pass for a run that
 # tested nothing. Ask whether the module is LOADED first; that answer is unambiguous.
+VARIANT=hide1
 if grep -q '^nomount ' /proc/modules 2>/dev/null || [ -d /sys/module/nomount ]; then
 	echo "variant: LKM (hide=0 - the module is listed, so its symbols are visible)"
+	VARIANT=hide0
 elif grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
 	echo "SKIP: this kernel has NoMount built in, so the LKM's guards are not"
 	echo "      present and nothing below can be observed. Boot a stock GKI"
@@ -51,11 +53,17 @@ fi
 ok "engine answers and is not in kallsyms: this is the LKM build"
 
 echo "== is the module actually hidden? =="
+# Only a hide=1 build claims to hide itself. The detection above already decided which
+# build this is, and then this block asserted invisibility unconditionally -- so on a
+# hide=0 build, which is the only one you can rmmod and therefore the one these tests are
+# usually run against, it reported three failures for behaviour that is working as built.
 for probe in "grep -c '^nomount' /proc/modules" "ls -d /sys/module/nomount" \
              "grep -c 'nomount' /proc/kallsyms"; do
 	n=$(eval "$probe" 2>/dev/null | tr -dc 0-9)
 	[ -z "$n" ] && n=0
-	if [ "$n" = 0 ]; then
+	if [ "$VARIANT" = hide0 ]; then
+		note "$probe -> $n (hide=0 build: invisibility is not asserted)"
+	elif [ "$n" = 0 ]; then
 		ok "clear: $probe"
 	else
 		bad "visible ($n): $probe"
@@ -63,9 +71,18 @@ for probe in "grep -c '^nomount' /proc/modules" "ls -d /sys/module/nomount" \
 done
 
 echo "== does it name itself in the ring buffer? =="
-# The guards print their "armed" lines only on hide=0 now, and lib.sh's nmlog
-# writes to /dev/kmsg only when /data/adb/nomount/kmsg exists.
-k=$(dmesg 2>/dev/null | grep -c 'nomount:')
+# lib.sh's nmlog writes to /dev/kmsg only when /data/adb/nomount/kmsg exists, so the
+# opt-in marker still governs those lines.
+#
+# The engine's own boot report is NOT governed by it: NM_GUARD in lkm/nomount_lkm.c
+# prints "guard <name> armed" with raw pr_info and "guard <name> OFF (rc)" with raw
+# pr_warn, plus an "N of M guards armed" summary -- none of them the hide-aware nm_say.
+# They land in dmesg on EVERY build, so counting every 'nomount:' line made this section
+# fail on every LKM build, for lines the module is built to print. Filter the boot report
+# out and keep failing on anything else, which is what the section is actually about.
+k=$(dmesg 2>/dev/null | grep 'nomount:' \
+	| grep -vE 'guard [a-z_]+ +(armed|OFF)|[0-9]+ of [0-9]+ guards armed' \
+	| grep -c .)
 if [ -e /data/adb/nomount/kmsg ]; then
 	note "kmsg opt-in marker present, so $k line(s) is expected"
 elif [ "${k:-0}" = 0 ]; then
@@ -79,9 +96,18 @@ echo "== hammer the path and stat guards, then look for a sleep in atomic =="
 # The deferred path_put and the kretprobe pool are what this exercises: every
 # lookup by a hidden caller goes through user_path_at's and do_filp_open's
 # return handlers. A kernel that still put a path from one of those complains.
-HID=$("$BIN" uid list 2>/dev/null | sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
+# A LIVE row only. `uid list` prints a "uid NNNNN" field for saved-but-not-applied and
+# engine-unreadable rows too, so taking the first row with any uid could drive every probe
+# below against a uid no guard is installed for -- which then reports ok, having measured
+# a uid nothing was hiding from.
+HID=$("$BIN" uid list 2>/dev/null \
+	| grep -E 'uid [0-9]{4,}' \
+	| grep -v 'not applied' \
+	| grep -v 'unreadable' \
+	| grep -E 'live' \
+	| sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
 if [ -z "$HID" ]; then
-	note "no uid on the hide list, so the guards cannot be driven - unmeasured"
+	note "no LIVE uid on the hide list, so the guards cannot be driven - unmeasured"
 else
 	before=$(dmesg 2>/dev/null | wc -l)
 	i=0

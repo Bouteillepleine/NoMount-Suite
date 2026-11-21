@@ -1767,6 +1767,92 @@ mod tests {
     const METAMOUNT_SRC: &str = include_str!("../module/metamount.sh");
 
     #[test]
+    fn the_wire_attribute_numbers_nm_hardcodes_match_the_engine_enum() {
+        const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
+        const NM_C: &str = include_str!("../userspace/src/nm.c");
+
+        // Read the enum's ordinals out of the header: UNSPEC is pinned at 0 and every
+        // member after it takes the next value.
+        let mut ord: HashMap<&str, u32> = HashMap::new();
+        let mut next = 0u32;
+        let mut inside = false;
+        for line in NOMOUNT_H.lines() {
+            let t = line.trim();
+            if t.starts_with("NOMOUNT_ATTR_UNSPEC") {
+                inside = true;
+                ord.insert("UNSPEC", 0);
+                next = 1;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if t.starts_with("__NOMOUNT_ATTR_MAX") {
+                break;
+            }
+            if let Some(rest) = t.strip_prefix("NOMOUNT_ATTR_") {
+                let name = rest.trim_end_matches(',').trim();
+                if !name.is_empty() && !name.contains(' ') {
+                    ord.insert(name, next);
+                    next += 1;
+                }
+            }
+        }
+        assert!(
+            ord.len() > 1,
+            "could not read the NOMOUNT_ATTR enum out of hookless/src/nomount.h, so this \
+             contract is checking nothing"
+        );
+
+        // nm.c is freestanding and does not include the engine's header: it addresses every
+        // attribute by bare integer (`at[n].type = 4`, `get_attr(rx, 5, 4)`). Nothing else
+        // in the repo compares the two -- the compile matrix builds the engine WITHOUT nm,
+        // and nm is built by zig but never run against an engine. Insert a member anywhere
+        // above DENY_APPIDS and every literal below it addresses the wrong attribute, on a
+        // wire that still parses and with no build error on either side.
+        for (name, want) in [
+            ("VIRTUAL_PATH", 1u32),
+            ("REAL_PATH", 2),
+            ("FLAGS", 3),
+            ("UID", 4),
+            ("VERSION", 5),
+            ("PAYLOAD", 6),
+            ("MODVER", 7),
+            ("KNOBS", 8),
+            ("UID_END", 9),
+            ("DENY_APPIDS", 10),
+        ] {
+            assert_eq!(
+                ord.get(name).copied(),
+                Some(want),
+                "NOMOUNT_ATTR_{name} is no longer {want} in hookless/src/nomount.h. \
+                 userspace/src/nm.c hardcodes that number, so change the two together or \
+                 the client starts addressing a different attribute"
+            );
+        }
+
+        // ...and the literals are still the ones nm.c sends, so the pin above is not
+        // guarding numbers nothing uses any more.
+        for lit in [
+            "at[n].type = 1;",
+            "at[n].type = 2;",
+            "at[n].type = 3;",
+            "at[n].type = 4;",
+            "at[n].type = 9;",
+            "at[n].type = 10;",
+            "get_attr(mem.rx_buf, 5, 4)",
+            "get_attr_str(mem.rx_buf, 7)",
+            "get_attr(mem.rx_buf, 8, 4)",
+        ] {
+            assert!(
+                NM_C.contains(lit),
+                "userspace/src/nm.c no longer contains `{lit}`; the ordinals pinned in this \
+                 test are not the ones it puts on the wire"
+            );
+        }
+    }
+
+    #[test]
     fn the_case_sweep_gate_is_wired_into_ci() {
         const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
         const SWEEP: &str = include_str!("../scripts/case-sweep.py");
@@ -1786,6 +1872,32 @@ mod tests {
             "case-sweep.py's escape-hatch marker changed; the failure message it prints and \
              this contract must name the same string"
         );
+        // The other three gates the test job runs. Only case-sweep and gate-sweep were
+        // pinned, so an edit to build.yaml could drop any of these and every test here
+        // would still pass -- a gate nobody runs is indistinguishable from a gate that
+        // cannot fail, which is the whole class this block exists to prevent.
+        for (needle, what) in [
+            (
+                "tests/lkm-load.sh",
+                "the LKM loader suite: KMI selection, the keep-the-device-.ko-on-update rule \
+                 and the prune",
+            ),
+            (
+                "scripts/webui-loadorder.js",
+                "the WebUI load-order and built-command gate: every part's dependencies and \
+                 whether each command it assembles still parses as shell",
+            ),
+            (
+                "tests/nm-parse-check.c",
+                "the host check of nm's --uid-excluded parsing, the contract Morphe's \
+                 \"NoMount only\" installs depend on",
+            ),
+        ] {
+            assert!(
+                BUILD_YAML.contains(needle),
+                "build.yaml no longer runs {needle}, so {what} stops being checked on every push"
+            );
+        }
         let branches = BUILD_YAML
             .lines()
             .find(|l| l.trim_start().starts_with("branches:"))

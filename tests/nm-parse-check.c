@@ -30,11 +30,18 @@ void c_main(long *sp) {
     static const unsigned int pair[] = { 10170, 10397 };
     static const unsigned int run[] = { 10000, 10001, 10002 };
     static const unsigned int top[] = { 99998, 99999 };
+    /* NM_DENY_MAX exactly: the largest input both forms must still ACCEPT. Only the
+     * over-limit side was pinned, so tightening the bound by one would have passed every
+     * case here while the error text and the engine's attribute both promise eight. */
+    static const unsigned int eight[] = {
+        10000, 10001, 10002, 10003, 10004, 10005, 10006, 10007
+    };
 
     /* upstream's C-D form */
     expect("1000-1000", 1, 1, a1000);           /* Morphe */
     expect("10002-10000", 1, 3, run);           /* reversed, as upstream accepts */
     expect("99998-99999", 1, 2, top);
+    expect("10000-10007", 1, 8, eight);         /* 8 appids: NM_DENY_MAX exactly */
     expect("10000-10008", 0, 0, 0);             /* 9 appids: over NM_DENY_MAX */
     expect("99999-100000", 0, 0, 0);            /* not an appid */
     expect("1010397-1010397", 0, 0, 0);         /* a raw uid, as in the list form */
@@ -44,6 +51,7 @@ void c_main(long *sp) {
 
     /* our appid list, unchanged */
     expect("10397,10170", 1, 2, pair);
+    expect("10000,10001,10002,10003,10004,10005,10006,10007", 1, 8, eight);
     expect("1000", 1, 1, a1000);
     expect("10397,10397", 0, 0, 0);
     expect("100000", 0, 0, 0);
