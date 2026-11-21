@@ -38,7 +38,8 @@
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/kprobes.h>
-#include <linux/sched/task_stack.h>
+#include <linux/sched.h>
+#include <linux/thread_info.h>
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/path.h>
@@ -125,6 +126,22 @@ struct nm_gp_sock_ctx {
 	int *perr;
 };
 
+/* Is this pointer inside the current task's kernel stack?
+ *
+ * The same bounds object_is_on_stack() checks, open-coded because that helper moved: it
+ * lives in <linux/sched.h> up to 4.10 and in <linux/sched/task_stack.h> from 4.11, and
+ * including the latter is a fatal error on the 4.9 KMI -- which the LKM matrix caught.
+ * `current->stack` and THREAD_SIZE are spelled the same way on every version this module
+ * builds for, VMAP_STACK included, so the test needs no version gate of its own.
+ */
+static bool nm_gp_on_task_stack(const void *p)
+{
+	unsigned long base = (unsigned long)current->stack;
+	unsigned long addr = (unsigned long)p;
+
+	return base && addr >= base && addr < base + THREAD_SIZE;
+}
+
 struct nm_gp_upa_ctx {
 	struct path *out;
 };
@@ -172,7 +189,7 @@ static int nm_gp_stat_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  * On the old convention `int *error` is the SIXTH argument, so x5 under AAPCS64, captured at
  * entry because the return handler sees a different register state.
  *
- * The object_is_on_stack() test is not paranoia about the source: it covers a vendor who
+ * The on-task-stack test is not paranoia about the source: it covers a vendor who
  * backported the refactor into a kernel still calling itself 5.15, where x5 would hold an
  * unrelated leftover value. A caller's `&err` is a local, so it is always on the current
  * task's stack; anything else means we do not understand this kernel, and then we leave the
@@ -204,7 +221,7 @@ static int nm_gp_sock_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
-	if (!ctx->perr || !object_is_on_stack(ctx->perr))
+	if (!ctx->perr || !nm_gp_on_task_stack(ctx->perr))
 		return 0;
 #endif
 
