@@ -25,7 +25,9 @@
  * where the arguments are still live: x0 is the seq_file, x1 the vfsmount. The
  * uid gate is tested first so an unblocked reader costs one comparison and
  * never renders a path -- that matters, because these handlers run once per
- * mount per read, and a mount table is a couple of hundred lines.
+ * mount per read, and a mount table is a couple of hundred lines. That ordering
+ * now lives inside ghost_hidden_mount() (ghost.c:403-410: both uid gates before
+ * dentry_path_raw), not in this file; it is still the contract.
  *
  * Failure is partial, not fatal. A kernel that inlines or renames a handler
  * loses that one surface and says so; the others stay armed. A kernel built
@@ -46,6 +48,7 @@
 #include "nm_hide.h"
 #include "nm_mount_filter.h"
 #include "nm_oot.h"
+#include "ghost.h"
 
 /* The engine's own "do we hide from this caller" predicate, the same one the
  * in-tree _ghost guard consults. It lives in nomount.c, which is part of this
@@ -64,7 +67,13 @@ struct nm_mf_ctx {
 /* A bind out of the userdata f2fs renders as /adb/modules/... because that
  * filesystem's root is presented at /data; /data/adb/modules/ covers layouts that
  * render it in full. Whether matching those two spellings can over-hide depends on
- * what the dentry is: see each caller. */
+ * what the dentry is: see nm_mf_reach_entry(), now the only caller.
+ *
+ * Deliberately NOT shared with the mountinfo handlers any more -- they go through
+ * ghost_hidden_mount(), which consults the live rule table as well. This one stays
+ * local because is_path_reachable() hands it a dentry, not a vfsmount, and because
+ * over-hiding there has a different cost: a reachability answer is not a line in a
+ * file, it is a decision the VFS acts on. Only the two spellings, on purpose. */
 static bool nm_mf_dentry_module_rooted(struct dentry *dentry)
 {
 	char buf[NM_MF_PATH_MAX];
@@ -81,23 +90,38 @@ static bool nm_mf_dentry_module_rooted(struct dentry *dentry)
 	       !strncmp(p, "/data/adb/modules/", 18);
 }
 
-/* mountinfo field 4 is the mount's root WITHIN its own filesystem, which is what
- * this renders. Neither spelling is ever a real lookup path, so for a mount root
- * matching them cannot over-hide. */
-static bool nm_mf_module_rooted(struct vfsmount *mnt)
-{
-	if (!mnt)
-		return false;
-
-	return nm_mf_dentry_module_rooted(mnt->mnt_root);
-}
-
+/* ghost_hidden_mount(), not a second copy of the matcher here.
+ *
+ * There used to be an nm_mf_module_rooted() wrapping the helper above, testing the two
+ * hardcoded spellings and nothing else. ghost.c:396 already has that predicate AND
+ * consults the live ghost rule table, which is the documented mechanism for adding a
+ * further bind root at runtime without a kernel change -- so a root an operator put in
+ * ghostpaths landed in the engine's table and this handler never looked, leaving the
+ * mount record visible while the Suite reported the rule as programmed.
+ *
+ * The audience does not change, which is the only reason this is a safe swap. The gates
+ * read differently -- nm_uid_blocked(current) here, ghost_uid_hidden(uid) there -- but
+ * ghost.c:156 is `if (nm_uid_blocked) return nm_uid_blocked(uid);`, and under #ifdef
+ * MODULE ghost.c:48 makes nm_uid_blocked a const pointer to the engine's strong symbol,
+ * non-NULL by construction in this build. In the .ko the two ARE the same predicate.
+ *
+ * Two things improve as a side effect: the path renders into ghost's per-cpu PATH_MAX
+ * buffer instead of a 256-byte stack buffer, so fewer long paths fail open, and a
+ * kretprobe entry handler stops putting 256 bytes on the stack. Context is unchanged:
+ * get_cpu_ptr() disables preemption where it is already disabled, dentry_path_raw()
+ * takes a seqlock, and the table read is under rcu_read_lock(). No sleeping lock.
+ *
+ * NOTE on what is verifiable from this repository: ghost_hidden_mount() has no other
+ * caller here -- hookless/patches/nomount_kernel_integration.patch does not reference it
+ * and does not patch show_mountinfo. The in-tree guard lives in the kernel-side _ghost
+ * patch set, which is not in this tree, so whether IT calls this predicate cannot be
+ * checked from here. Either way this handler should.
+ */
 static int nm_mf_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_mf_ctx *ctx = (struct nm_mf_ctx *)ri->data;
 
-	ctx->hide = nm_uid_blocked(__kuid_val(current_uid())) &&
-		    nm_mf_module_rooted((struct vfsmount *)regs->regs[1]);
+	ctx->hide = ghost_hidden_mount((struct vfsmount *)regs->regs[1]);
 	return 0;
 }
 

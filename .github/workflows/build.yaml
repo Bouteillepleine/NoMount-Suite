@@ -390,6 +390,10 @@ jobs:
             echo "::error::another KMI's module under its own name"
             find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + | sort
             exit 1; }
+          # Said out loud, because a gate that prints nothing when it passes cannot be
+          # told from one that did not run -- which is how CONFIG_OVERLAY_FS and the
+          # -Werror #warning both hid for weeks. One line, and the log shows the check.
+          echo "8 engine modules, $d distinct"
 
       - name: Setup zig
         env:
