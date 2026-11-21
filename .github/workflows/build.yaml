@@ -243,7 +243,12 @@ jobs:
           llvm-strip --strip-unneeded -R .BTF "out/nomount-${{ matrix.kmi }}.ko"
           for _re in llvm-readelf readelf; do
             command -v "$_re" >/dev/null 2>&1 || continue
-            if "$_re" -S "out/nomount-${{ matrix.kmi }}.ko" | grep -q '\.BTF'; then
+            # The section name as its own field. A bare '\.BTF' also matches `.BTF_ids`,
+            # which is a different section that `-R .BTF` does not remove and which the
+            # 6.12 and 6.18 modules carry - so the first version of this assertion failed
+            # those two KMIs for a section that was never the problem.
+            if "$_re" -S "out/nomount-${{ matrix.kmi }}.ko" \
+                 | grep -qE '[[:space:]]\.BTF([[:space:]]|$)'; then
               echo "::error::.BTF is still in nomount-${{ matrix.kmi }}.ko after the strip"
               exit 1
             fi

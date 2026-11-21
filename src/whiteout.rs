@@ -244,7 +244,7 @@ pub(crate) fn forget_locked(target: &str) -> Result<bool> {
 pub(crate) fn relist_locked(target: &str) -> Result<bool> {
     let t = norm(target.trim());
     let mut list = read()?;
-    if list.iter().any(|x| *x == t) {
+    if list.contains(&t) {
         return Ok(false);
     }
     list.push(t);
