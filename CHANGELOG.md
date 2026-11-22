@@ -8,6 +8,13 @@
 
 ## v1.3.217 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
 
+- A synthesized parent directory is absent until its metadata exists, instead of briefly
+  readable with a name-hash inode number and a block size of 1. On an OP15 that window was
+  about 116 microseconds wide and an app that stat'ed the directory inside it saw numbers no
+  real directory on the ROM can produce.
+- The engine reports a build version that moves when the engine changes, so `nomount check`
+  and the WebUI footer can tell a kernel rebuilt with these fixes from one without them. It
+  had been reporting the same string either way, which made the line above unverifiable.
 - A file whose name carries an invisible character — an emoji variation selector, a zero-width
   joiner — can be opened and stat'ed again by an app on the hide list. Every such path was
   answered "no such file" whether or not a rule named it, so an app could not reach its own
