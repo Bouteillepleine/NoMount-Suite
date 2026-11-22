@@ -148,7 +148,13 @@ static void split_path(const char *p, char *dir, size_t dsz, char *base, size_t 
 #define A_CTX 0x08  /* no security.selinux -> v_ctx_len 0 */
 #define A_DENT 0x10 /* parent's d_ino disagrees with stat's st_ino */
 
-static uint64_t ino_ceiling = 100000; /* overridden by `control`; see conc2-check.sh */
+/* Overridden by conc2-check.sh, which does NOT pass `control`'s sibling maximum: it
+ * passes what the MOUNT issued across the same device. A parent whose direct subdirs
+ * happen to be numbered 3..28 would otherwise make any synthesized dir at 29 an
+ * "anomaly" while the filesystem itself issues directory inodes up to seven digits.
+ * `control` still prints the sibling range -- it is an observation, not the comparand. */
+static uint64_t ino_ceiling = 100000;
+static uint64_t ino_slack = 16;   /* CONC2_INO_SLACK; see flags() */
 /* A missing security.selinux is only a tell where the control showed labels at
  * all. Disarmed by default so a filesystem that labels nothing cannot false-PASS
  * this probe -- the same control-calibration the ino ceiling gets. */
@@ -163,7 +169,13 @@ static int flags_of(const struct stx *s)
 	 * window should zero all three; how many it actually zeroed is printed. */
 	if (s->stx_mtime.tv_sec == 0)
 		f |= A_TIME;
-	if (s->stx_ino > ino_ceiling)
+	/* ceiling + slack, not ceiling. The ceiling is the highest inode this MOUNT has
+	 * issued; the number it issues NEXT is ceiling+1, so flagging that was flagging
+	 * the most plausible value there is. The defect this test exists for was an inode
+	 * of 1779265970 -- the raw name hash -- against a ceiling of 28, which clears any
+	 * sane slack by eight orders of magnitude. conc2-check.sh sets the slack from how
+	 * many entries the mount holds. */
+	if (s->stx_ino > ino_ceiling + ino_slack)
 		f |= A_INO;
 	if (s->stx_blksize == 0)
 		f |= A_BLK;
@@ -285,7 +297,9 @@ static int mode_control(const char *dir)
 	printf("  d_ino != st_ino %d of %d%s\n", n_dent, n_dirs,
 	       n_dent ? "   <- STOCK already disagrees here (overlayfs); test stays off"
 			: "");
-	printf("INO_CEILING=%llu\n", (unsigned long long)hi);
+	/* Named SIBLING_MAX, not INO_CEILING: this is the direct-sibling maximum, and the
+	 * driver widens it to the mount's range before arming the test. */
+	printf("SIBLING_MAX=%llu\n", (unsigned long long)hi);
 	printf("ZERO_TIME_STOCK=%d\n", n_zero_time);
 	printf("CTX_STOCK=%d\n", n_ctx);
 	printf("DENT_STOCK=%d\n", n_dent);
@@ -422,6 +436,9 @@ int main(int argc, char **argv)
 	const char *env = getenv("CONC2_INO_CEILING");
 	if (env)
 		ino_ceiling = strtoull(env, NULL, 10);
+	env = getenv("CONC2_INO_SLACK");
+	if (env)
+		ino_slack = strtoull(env, NULL, 10);
 	env = getenv("CONC2_EXPECT_CTX");
 	if (env)
 		expect_ctx = atoi(env) != 0;
@@ -440,7 +457,9 @@ int main(int argc, char **argv)
 		"usage: %s control <dir>\n"
 		"       %s watch   <path> <ms>\n"
 		"       %s read    <path>\n"
-		"env:   CONC2_INO_CEILING=<n>  ino above which to flag (from `control`)\n"
+		"env:   CONC2_INO_CEILING=<n>  ino above which to flag -- the MOUNT's range,\n"
+		"                              which conc2-check.sh measures; NOT this parent's\n"
+		"                              SIBLING_MAX, which `control` only reports\n"
 		"       CONC2_EXPECT_CTX=1     arm the missing-secctx test (from `control`)\n"
 		"       CONC2_EXPECT_DENT=1    arm the d_ino/st_ino test (from `control`)\n",
 		argv[0], argv[0], argv[0]);

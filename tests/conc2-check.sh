@@ -73,7 +73,7 @@ echo
 # Gate 0: the ceiling is measured here, not assumed.
 CTL=$("$PROBE" control "$PARENT")
 echo "$CTL"
-CEIL=$(echo "$CTL" | sed -n 's/^INO_CEILING=//p')
+CEIL=$(echo "$CTL" | sed -n 's/^SIBLING_MAX=//p')
 ZSTOCK=$(echo "$CTL" | sed -n 's/^ZERO_TIME_STOCK=//p')
 CTXSTOCK=$(echo "$CTL" | sed -n 's/^CTX_STOCK=//p')
 DENTSTOCK=$(echo "$CTL" | sed -n 's/^DENT_STOCK=//p')
@@ -85,10 +85,24 @@ if [ "${ZSTOCK:-0}" != 0 ]; then
 	echo "STOP: $ZSTOCK stock subdir(s) of $PARENT already have mtime 0, so mtime==0"
 	echo "      is NOT a tell on this parent. Use the ino test alone and say so."
 fi
+# The comparand is this MOUNT's maximum, and conc2-probe flags only a value the mount
+# could not plausibly issue NEXT -- see CONC2_INO_SLACK below.
+#
+# Measured on an OP15 before getting this wrong twice: /product/overlay is its own mount
+# (dev 27) holding exactly 26 entries, ALL directories, inodes 3..28 and nothing else.
+# Its 225 "children" live on other devices (29/30/35). So widening the sample across the
+# partition is meaningless here -- those are different mounts, and an inode is only
+# comparable against the filesystem that issued it. The sibling maximum IS the right
+# ceiling; what was wrong was treating ceiling+1 as an anomaly, when that is exactly the
+# number this mount would hand out next.
+NSIB=$(echo "$CTL" | sed -n 's/^  n_subdirs *//p')
+SLACK=$(( ${NSIB:-0} > 16 ? ${NSIB:-0} : 16 ))
+export CONC2_INO_SLACK="$SLACK"
+echo "  ino ceiling:   $CEIL + $SLACK slack (this mount issued $CEIL over ${NSIB:-?} entries;"
+echo "                 ceiling+1 is its next number, a name hash is not)"
 export CONC2_INO_CEILING="$CEIL"
 [ "${CTXSTOCK:-0}" != 0 ] && export CONC2_EXPECT_CTX=1
 [ "${DENTSTOCK:-0}" = 0 ] && export CONC2_EXPECT_DENT=1
-echo "  ino ceiling:   $CEIL (measured above)"
 if [ -n "$CONC2_EXPECT_CTX" ]; then echo "  secctx test:   armed (stock labels $CTXSTOCK of its subdirs)"
 else echo "  secctx test:   OFF (stock labels nothing here)"; fi
 if [ -n "$CONC2_EXPECT_DENT" ]; then echo "  d_ino test:    armed (stock d_ino agrees with st_ino here)"
