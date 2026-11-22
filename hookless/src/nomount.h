@@ -203,6 +203,7 @@ struct nomount_rule {
     u32 v_result_mask;
     u32 v_dio_mem, v_dio_off;
     u8  v_cap;
+    u8  pending;    /* minted, not yet stamped -- see nm_rule_visible() */
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
