@@ -21,8 +21,7 @@
 
 #include "nm_hide.h"
 #include "nm_xattr_guard.h"
-
-bool nm_inode_hidden_from_caller(const struct inode *inode);
+#include "nm_engine.h"
 
 struct nm_xg_ctx {
 	bool hidden;

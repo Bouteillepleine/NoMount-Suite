@@ -10,9 +10,7 @@
 
 #include "nm_hide.h"
 #include "nm_maps_spoof.h"
-
-void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
-			   unsigned long *ino);
+#include "nm_engine.h"
 
 /* What is parked between the two probes is the ANSWER, not a pointer to the
  * inode it came from.

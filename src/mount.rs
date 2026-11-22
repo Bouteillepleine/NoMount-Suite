@@ -2039,6 +2039,40 @@ mod tests {
             "ghost.c has fewer than three mentions of ghost_strip_ignorable (one definition, \
              two calls), so one of the two rule-anchored paths has lost its stripped-form test"
         );
+        // The engine's surface to the LKM, pinned against its definitions. lkm/nm_engine.h
+        // declares three functions that hookless/src/nomount.c defines, and the two are in
+        // different build systems: the module's TUs only ever see the header, the engine's
+        // only ever see the definition, and C has no name mangling -- so a signature that
+        // drifts still compiles on every board, still links, and first shows up as an
+        // argument read from the wrong register on a device. Nothing else compares them.
+        // (ghost.c keeps its own weak/pointer declaration on purpose: it is vendored
+        // byte-identical in-tree and needs the #ifdef MODULE shim for the arm64 GOT reloc.)
+        const NM_ENGINE_H: &str = include_str!("../lkm/nm_engine.h");
+        const ENGINE_C: &str = include_str!("../hookless/src/nomount.c");
+        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let engine = squash(ENGINE_C);
+        for decl in [
+            "bool nm_uid_blocked(uid_t uid)",
+            "bool nm_inode_hidden_from_caller(const struct inode *inode)",
+            "void vfs_map_meta_override(const struct inode *inode, dev_t *dev, unsigned long *ino)",
+        ] {
+            assert!(
+                squash(NM_ENGINE_H).contains(decl),
+                "lkm/nm_engine.h no longer declares `{decl}`; the LKM calls it and only this \
+                 header says what shape it has"
+            );
+            // `decl` followed by a BRACE, which is the definition. Matching the bare
+            // string matched nothing useful: nomount.c carries its own forward
+            // declaration one line above each of these, so a definition that drifted
+            // still satisfied `contains` via the stale `;` line next to it. Verified by
+            // planting a drift -- this arm did not fire until it was anchored.
+            assert!(
+                engine.contains(&format!("{decl} {{")),
+                "hookless/src/nomount.c no longer DEFINES `{decl}` with that signature, but \
+                 lkm/nm_engine.h still declares it that way. Both halves compile and link; \
+                 the mismatch only appears as a wrong argument at runtime"
+            );
+        }
         const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
         let wire = NOMOUNT_H
             .lines()

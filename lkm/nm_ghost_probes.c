@@ -56,6 +56,7 @@
 #include <linux/dcache.h>
 
 #include "ghost.h"
+#include "nm_engine.h"
 #include "nm_defer.h"
 #include "nm_hide.h"
 #include "nm_ghost_probes.h"
@@ -74,7 +75,6 @@ int nm_ghost_get_rule_fwd(int idx, char *out, size_t outsz)
 	return ghost_get_rule(idx, out, outsz);
 }
 
-bool nm_uid_blocked(uid_t uid);
 
 /* Hide by OWNER, not by name.
  *

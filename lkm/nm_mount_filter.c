@@ -48,12 +48,14 @@
 #include "nm_hide.h"
 #include "nm_mount_filter.h"
 #include "nm_oot.h"
+#include "nm_engine.h"
 #include "ghost.h"
 
-/* The engine's own "do we hide from this caller" predicate, the same one the
- * in-tree _ghost guard consults. It lives in nomount.c, which is part of this
- * module, so this is a direct call and not a weak companion hook. */
-bool nm_uid_blocked(uid_t uid);
+/* nm_uid_blocked() -- the engine's own "do we hide from this caller" predicate, the
+ * same one the in-tree _ghost guard consults. It lives in nomount.c, which is part of
+ * this module, so this is a direct call and not a weak companion hook. Declared in
+ * nm_engine.h with the other two engine symbols, and pinned there; it used to be
+ * hand-declared here, which no build could have caught going wrong. */
 
 struct nm_mf_ctx {
 	bool hide;
