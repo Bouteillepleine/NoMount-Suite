@@ -51,17 +51,14 @@ unsigned long nm_oot_lookup(const char *name)
 {
     unsigned long addr = nm_oot_lookup_opt(name);
 
+    /* What the caller DOES about it, not what an absent symbol might mean in general.
+     * This used to say "the module cannot load against this build", which is not what
+     * happens: the one caller (nm_hide.c, module_mutex) warns and carries on, so the
+     * module loads and simply stays listed in /proc/modules. A log line asserting a
+     * failure the code then does not take is worse than no line -- it sends whoever
+     * reads it looking for an insmod error that never occurred. */
     if (!addr)
-        pr_err("nomount: kernel symbol '%s' not found. The engine calls it and "
-               "this kernel does not export it, so the module cannot load "
-               "against this build.\n", name);
+        pr_err("nomount: kernel symbol '%s' not found in kallsyms; the guard that "
+               "needs it will say what it is giving up.\n", name);
     return addr;
-}
-
-int nm_oot_resolve_all(void)
-{
-    if (!nm_kln && nm_bootstrap_kln() < 0)
-        return -ENOENT;
-
-    return 0;
 }
