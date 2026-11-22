@@ -41,7 +41,26 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "target $P   dev=$(stat -c %d "$P")   rules before: $($NM vfs list 2>/dev/null | grep -c .)"
-echo "devices already carrying rules (warm): $($NM vfs list 2>/dev/null | sed 's/ ->.*//;s/ (public)$//' | while read -r v; do stat -c %d "$v" 2>/dev/null; done | sort -un | tr '\n' ' ')"
+# Warm = the device the PLACER keys on, which is pop->dev: the device of the PARENT
+# directory being injected into (nomount.c:4611, 4622, 4721, and 4313 via sl->pop.dev).
+# This used to stat the rule's own virtual path, which returns the INJECTED inode's
+# synthesized dev instead -- a different number. Measured on this OP15, 287 rules:
+#   by parent dev (right):   27 49 58 113 65048 65049 65050 65051 65061
+#   by injected dev (wrong): 35 55 62 116 65048 65049 65050 65051 65061
+# Four of nine disagree, so /product/overlay, /product/app, /product/priv-app and
+# /my_product/* read as COLD while the placer has them warm. A run aimed at one of those
+# would have measured a warm slot and reported "no collision on the cold path" -- a pass
+# that proves nothing, which is the one outcome this script must not be able to produce.
+# /odm (65054) is cold under both keyings, so the target below was never wrong; the
+# witness for it was.
+$NM vfs list 2>$T/vlerr | sed 's/ ->.*//;s/ (public)$//' | sed 's|/[^/]*$||' | sort -u \
+	| while read -r d; do stat -c %d "$d" 2>/dev/null; done | sort -un > $T/warm
+[ -s $T/warm ] || { echo "fatal: no warm devices resolved -- vfs list said:"; cat $T/vlerr
+	echo "   (every device would read as cold, so refusing to measure)"; exit 1; }
+echo "devices already carrying rules (warm, by parent dev): $(tr '\n' ' ' < $T/warm)"
+case " $(tr '\n' ' ' < $T/warm) " in
+	*" $(stat -c %d "$P") "*) echo "   !! $P is on a WARM device -- this run cannot measure the cold path"; exit 1;;
+esac
 
 snap $T/before
 echo "baseline: $(grep -c . $T/before) children, $(awk '{print $1" "$2}' $T/before | sort | uniq -d | grep -c .) collision(s)"

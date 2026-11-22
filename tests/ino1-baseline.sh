@@ -38,9 +38,28 @@ kids() {
 	return 0
 }
 
-$NM vfs list 2>/dev/null | sed 's/ ->.*//' | sed 's/ (public)$//' | sort -u > $T/inj
+# stderr kept, and zero rules is FATAL. With 2>/dev/null a vfs list that failed -- a
+# wrong NM path, an SELinux denial on the netlink socket, an engine that is not up --
+# left $T/inj empty, and empty is not neutral here: PASS 1 then iterates nothing, and
+# PASS 2's "engine never touched this" filter (grep -qF "$D/" $T/inj) matches nothing,
+# so EVERY directory counts as stock and the run prints a tidy table of zeros that reads
+# as "no natural collisions". The measurement would not have happened.
+$NM vfs list 2>$T/vlerr | sed 's/ ->.*//' | sed 's/ (public)$//' | sort -u > $T/inj
+if [ ! -s $T/inj ]; then
+	echo "fatal: vfs list returned no rules. It said:"
+	sed 's/^/   /' $T/vlerr
+	echo "   NM=$NM"
+	echo "   Refusing to continue: with no rule list every directory reads as stock and"
+	echo "   both passes report zeros they never measured."
+	rm -rf $T; exit 1
+fi
 sed 's|/[^/]*$||' $T/inj | sort -u > $T/parents
 echo "rules: $(grep -c . $T/inj)   distinct parents: $(grep -c . $T/parents)"
+# The device the placer keys on is the PARENT's (pop->dev, nomount.c:4611/4622/4721), not
+# the injected inode's. Printed so a cold-slot run has the right list to pick against.
+printf "warm devices (by parent dev, what di->used is keyed on): "
+while IFS= read -r d; do stat -c %d "$d" 2>/dev/null; done < $T/parents | sort -un | tr '\n' ' '
+echo
 
 echo
 echo "== PASS 1: every parent holding injected rules =="
