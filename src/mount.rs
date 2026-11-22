@@ -2073,12 +2073,33 @@ mod tests {
                  the mismatch only appears as a wrong argument at runtime"
             );
         }
+        // Every capability gate must name a version the engine has actually reached.
+        // A constant above NOMOUNT_VERSION is a branch that can never be true: the
+        // Suite would silently stop warning about something, and because all four of
+        // these guard the OLD-engine arm, nothing on a current device would notice.
+        // Cheap to check, and the four numbers were bare integers until they were
+        // named, so a typo had nothing to catch it.
         const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
         let wire = NOMOUNT_H
             .lines()
             .find_map(|l| l.strip_prefix("#define NOMOUNT_VERSION"))
             .and_then(|v| v.trim().parse::<u32>().ok())
             .expect("nomount.h no longer defines NOMOUNT_VERSION");
+        for (name, v) in [
+            ("EROFS_DIR_SIZE", crate::nm::caps::EROFS_DIR_SIZE),
+            ("PM_REGISTERED_EXEMPT", crate::nm::caps::PM_REGISTERED_EXEMPT),
+            ("PUBLIC_ON_READ_PATHS", crate::nm::caps::PUBLIC_ON_READ_PATHS),
+            ("GHOST_CONTROL_PLANE", crate::nm::caps::GHOST_CONTROL_PLANE),
+        ] {
+            assert!(
+                v <= wire,
+                "nm::caps::{name} is {v}, above NOMOUNT_VERSION {wire}. Every one of these \
+                 gates the OLD-engine arm, so a constant the engine has not reached makes \
+                 that arm unreachable and the Suite silently stops warning -- and nothing \
+                 on a current device would notice. They were bare integers until they were \
+                 named; this is what catches a typo in one"
+            );
+        }
         let label = NOMOUNT_H
             .lines()
             .find_map(|l| l.strip_prefix("#define NM_MODULE_VERSION"))

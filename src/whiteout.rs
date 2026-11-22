@@ -21,12 +21,18 @@ pub(crate) fn measurable_hole(target: &Path) -> bool {
     if size >= 4096 || size == 0 {
         return true;
     }
-    engine_predates_v13()
+    engine_predates_erofs_dir_size()
 }
 
-fn engine_predates_v13() -> bool {
+/// Unreadable engine => true: an unmeasured engine must not be assumed to carry the fix.
+fn engine_predates_erofs_dir_size() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
+    *V.get_or_init(|| {
+        crate::nm::Nm::new()
+            .version()
+            .map(|v| v < crate::nm::caps::EROFS_DIR_SIZE)
+            .unwrap_or(true)
+    })
 }
 
 enum Match {

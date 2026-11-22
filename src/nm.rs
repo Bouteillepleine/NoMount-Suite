@@ -8,6 +8,45 @@ use anyhow::{bail, Context, Result};
 
 const DEFAULT_NM_BIN: &str = "/data/adb/modules/meta-nomount/bin/arm64-v8a/nm";
 
+/// The engine wire version at which each capability the Suite gates on first shipped.
+///
+/// These were four bare integers spread across two files -- `v < 13`, `>= 17`, `< 15`,
+/// `>= 26` -- with nothing saying what any of them gated. A reader could not tell a
+/// deliberate floor from a typo, and neither could a reviewer: every one of them is
+/// satisfied by the current engine, so all four "old engine" arms are dead code that no
+/// test exercises. Naming them is the only thing that makes them checkable by eye.
+///
+/// Each number is the `NOMOUNT_VERSION` the named change landed with, found by walking
+/// `hookless/src/nomount.h`'s history rather than by assuming the comment nearby was
+/// right. The commit is quoted so the next person can re-derive it in one command.
+///
+/// NOTE these track the WIRE version, which only moves when the protocol does -- see
+/// `version_full()`. Two kernels that behave differently can both answer 36, so a gate
+/// here says "the protocol is new enough", never "this kernel has the fix". For that,
+/// the build string is the only witness.
+pub mod caps {
+    /// v13 -- `9ea666e` "keep an erofs dir's size consistent with the listing we serve".
+    /// Below this the engine does not correct an erofs directory's size after a
+    /// whiteout, so the hole is measurable from the parent's st_size alone.
+    pub const EROFS_DIR_SIZE: u32 = 13;
+
+    /// v15 -- `1ea4764` "keep a PackageManager-registered APK visible to a hidden
+    /// reader". Below this, hiding an app also hides APKs Android has registered for
+    /// it, and anything walking the package list gets ENOENT for a file PM says exists.
+    pub const PM_REGISTERED_EXEMPT: u32 = 15;
+
+    /// v17 -- `7704ee0` "keep PUBLIC on a shadowed ROM APK", widened by `37e9124`
+    /// "honour PUBLIC on the read paths, widen it to PM codePaths". Below this the
+    /// PUBLIC flag is not honoured on reads, so warning about rules that lack it would
+    /// be advice the engine cannot act on.
+    pub const PUBLIC_ON_READ_PATHS: u32 = 17;
+
+    /// v26 -- `347ec5c` "forward the ghost control plane". Below this the engine has no
+    /// `ghost_ctl`/`ghost_get_rule` forwarders, so the cloak cannot be listed and there
+    /// is nothing to test.
+    pub const GHOST_CONTROL_PLANE: u32 = 26;
+}
+
 pub struct Nm {
     bin: String,
 }

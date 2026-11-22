@@ -1504,7 +1504,11 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     }
 
     let engine_v = engine.unwrap_or(0);
-    if live_ok && !hidden_apps.is_empty() && engine_v >= 17 && !pm_rules_no_public.is_empty() {
+    if live_ok
+        && !hidden_apps.is_empty()
+        && engine_v >= crate::nm::caps::PUBLIC_ON_READ_PATHS
+        && !pm_rules_no_public.is_empty()
+    {
         let shown: Vec<String> =
             pm_rules_no_public.iter().take(3).map(|t| t.display().to_string()).collect();
         let more = pm_rules_no_public.len().saturating_sub(shown.len());
@@ -1523,7 +1527,11 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && engine_v < 15 {
+    if live_ok
+        && !hidden_apps.is_empty()
+        && pm_rules > 0
+        && engine_v < crate::nm::caps::PM_REGISTERED_EXEMPT
+    {
         f.push(Finding {
             level: Level::Warn,
             check: "engine predates the hiding opt-out",
@@ -1549,7 +1557,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && engine_v >= 26 && nm.ghost_present() != Some(false) {
+    if live_ok && engine_v >= crate::nm::caps::GHOST_CONTROL_PLANE && nm.ghost_present() != Some(false) {
         let listed = nm.ghost_list();
         if let Err(e) = &listed {
             f.push(Finding {
