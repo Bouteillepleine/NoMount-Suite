@@ -10,14 +10,23 @@ labels: bug
 
 ## Checks
 
-**Easiest, no PC needed: open the module's WebUI, go to *Checks* →
-*Developer tools* → *Export*.** Attach the folder it names.
+**Easiest, no PC needed: open the module's WebUI, go to *Checks*, tap
+*Copy report* and paste it below.** It is already redacted.
 
-It writes a timestamped bundle to `/sdcard/Download` containing `check.txt`,
-the mount table and the live rules. **Anything that names the apps you hide is
-withheld automatically** when the destination is shared storage: the hide-list
+<details><summary>Report (paste here)</summary>
+
+```
+```
+
+</details>
+
+If we ask for more: *Checks* → *Developer tools* → *Export* writes a
+timestamped `.zip` to `/sdcard/Download`. Attach that zip (GitHub takes files,
+not folders). It holds `check.txt`, the mount table and the live rules.
+**Anything that names the apps you hide is withheld automatically** when the
+destination is shared storage: the hide-list
 files, `spoof.conf` and `boot.log` are left out, and `dmesg-nomount.txt` is
-replaced by a stub. The bundle lists what it withheld. If your report is about boot behaviour we will
+replaced by a stub. The bundle's `WITHHELD.txt` lists what it left out. If your report is about boot behaviour we will
 probably need `boot.log` too - run `nomount export /data/adb/nomount/report`, copy it off with
 `adb exec-out su -c "tar -C /data/adb/nomount/report -cf - ." > report.tar` (never via /sdcard, which apps can read) and share that privately.
 

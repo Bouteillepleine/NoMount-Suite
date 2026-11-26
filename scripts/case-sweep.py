@@ -62,7 +62,31 @@ CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml",
 
 CODE_NAMES = ("module.prop",)
 
-COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
+CPP_DIRECTIVE = re.compile(
+    r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif|define|undef|include|error|warning|pragma|line)\b")
+
+
+def is_comment(path, line):
+    """A comment in that file's own language, so a case change on it is not code.
+
+    One regex for every file treated `#` and `*` as comment starts everywhere: a lowered
+    `#ifdef CONFIG_COMPAT` (a C directive, not a comment) or a lowered shell case arm
+    `*"nomount: WARNING"*)` passed as "only a comment".
+    """
+    s = line.lstrip()
+    base = path.rsplit("/", 1)[-1]
+    ext = "." + base.rsplit(".", 1)[-1] if "." in base else ""
+    if ext in (".c", ".h", ".patch"):
+        return not CPP_DIRECTIVE.match(line) and s.startswith(("//", "/*", "*"))
+    if ext in (".rs", ".js"):
+        return s.startswith(("//", "/*", "*"))
+    if ext == ".css":
+        return s.startswith(("/*", "*"))
+    if ext in (".sh", ".py", ".toml", ".yml", ".yaml") or base == "module.prop":
+        return s.startswith("#")
+    if ext == ".html":
+        return s.startswith("<!--")
+    return False
 
 CAPS = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 
@@ -129,7 +153,7 @@ def case_only_pairs(rev):
 def hits_for(rev):
     out = []
     for path, old, new in case_only_pairs(rev):
-        if COMMENT.match(old):
+        if is_comment(path, old):
             continue
         def tokens(t):
             return set(CAPS.findall(t)) | set(CAMEL.findall(t)) | set(PASCAL.findall(t))

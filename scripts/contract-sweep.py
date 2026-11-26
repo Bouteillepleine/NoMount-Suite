@@ -35,12 +35,10 @@ Three sweeps:
                path constants must still be `const X = "literal";`.
 
 Status: (a) and (b) are advisory, run by hand. (c) RUNS IN CI (build.yaml,
-"WebUI root-call quoting") because it is clean on a good tree and was proven to
-fail against five planted holes: an unquoted ${} in nm(), a value concatenated
-on either side of a root call, a data-arg that stopped being a literal, and a
-path constant that stopped being one. The leading-concatenation case was found
-BY planting it - the first cut matched only `+ ident` and let `exec(VAR + '...')`
-through.
+"WebUI root-call quoting") because it is clean on a good tree, and every run first
+re-plants the holes in QUOTING_PLANTS into a copy of the WebUI and fails if any
+gets through. The leading-concatenation case was found BY planting it - the first
+cut matched only `+ ident` and let `exec(VAR + '...')` through.
 
   * `case` reports the whole case-only class, including deliberate repairs - sweeping
     3b05955..v1.3.180 reports four lines, and all four are the round-11 fixes putting
@@ -63,9 +61,19 @@ import sys
 
 ROOT = os.environ.get("SWEEP_ROOT") or os.getcwd()
 
-CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py",
-            ".toml", ".json", ".html")
-COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
+# The file types and the comment rule come from case-sweep.py, the blocking gate, so this
+# wider net cannot silently cover less than it does (it once skipped every .js file).
+def _case_sweep():
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("case_sweep", os.path.join(here, "case-sweep.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_cs = _case_sweep()
+CODE_EXT, CODE_NAMES, is_comment = _cs.CODE_EXT, _cs.CODE_NAMES, _cs.is_comment
 
 
 def git(*args):
@@ -85,7 +93,7 @@ def case_pairs(rev):
     path, dels, adds, found = None, [], [], []
 
     def flush():
-        if not path or not path.endswith(CODE_EXT):
+        if not path or not (path.endswith(CODE_EXT) or path.endswith(CODE_NAMES)):
             return
         by_lower = {}
         for new in adds:
@@ -121,7 +129,7 @@ def sweep_case(spec):
     total = 0
     for rev in revs:
         subject = git("log", "-1", "--format=%h %s", rev).strip()
-        hits = [(p, o, n) for p, o, n in case_pairs(rev) if not COMMENT.match(o)]
+        hits = [(p, o, n) for p, o, n in case_pairs(rev) if not is_comment(p, o)]
         if not hits:
             continue
         total += len(hits)
@@ -387,6 +395,46 @@ def _code_only(arg):
     return "".join(out)
 
 
+def _strip_shq(code):
+    """`shq(...)` calls blanked, nested parens included: what is inside is quoted."""
+    out, i = [], 0
+    while True:
+        m = re.search(r"(?<![\w$.])shq\s*\(", code[i:])
+        if not m:
+            out.append(code[i:])
+            return "".join(out)
+        a = i + m.start()
+        out.append(code[i:a])
+        depth, j = 0, i + m.end() - 1
+        while j < len(code):
+            if code[j] == "(":
+                depth += 1
+            elif code[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.append(" 0 ")
+        i = j + 1
+
+
+MAP_JOIN = re.compile(
+    r"(?<![\w$.])[A-Za-z_$][\w$]*\s*\.\s*map\s*\(\s*function\s*\(\s*[A-Za-z_$][\w$]*\s*\)"
+    r"\s*\{\s*return\s+0\s*;?\s*\}\s*\)\s*\.\s*join\s*\(\s*0\s*\)")
+
+ENCLOSING_FN = re.compile(r"function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)")
+
+
+def _enclosing_fn(src, pos):
+    """The innermost named function whose header precedes pos: name and params."""
+    last = None
+    for m in ENCLOSING_FN.finditer(src, 0, pos):
+        last = m
+    if not last:
+        return None, []
+    return last.group(1), [p.strip() for p in last.group(2).split(",")]
+
+
 def _data_args_for(html, handler):
     """Every data-arg on a tag whose data-act is `handler`, order-independent."""
     out = []
@@ -398,7 +446,7 @@ def _data_args_for(html, handler):
     return out
 
 
-def sweep_quoting():
+def _quoting_findings():
     bad, checked = [], 0
     html = read("module/webroot/index.html")
 
@@ -434,7 +482,11 @@ def sweep_quoting():
                 if expr.startswith("shq("):
                     continue
                 if IDENT.match(expr) and expr in QUOTE_ARG_OK:
-                    continue
+                    # Only as the parameter of the handler whose data-arg was checked:
+                    # the bare name anywhere else (`const mode = target`) is not that value.
+                    fn, params = _enclosing_fn(src, m.start())
+                    if fn == QUOTE_ARG_OK[expr] and expr in params:
+                        continue
                 if (expr, rel) == QUOTE_RAW_HELPER:
                     continue
                 bad.append((rel, line,
@@ -451,7 +503,86 @@ def sweep_quoting():
                             "%s(): `+ %s` concatenates an identifier into a root shell "
                             "string - wrap it in shq() or make it a literal"
                             % (m.group(1), ident)))
+            # A command must be assembled inside the call: an argument that is a variable,
+            # a .join() or a .concat() was built where nothing above can see it.
+            # The one shape allowed to use a name: a .map() whose body returns a template
+            # (each of its ${...} was checked above) joined by a literal.
+            code = MAP_JOIN.sub(" 0 ", _strip_shq(_code_only(arg)))
+            left = re.findall(r"(?<![\w$.])[A-Za-z_$][\w$]*", code)
+            for ident in left:
+                if ident in QUOTE_CONST_OK:
+                    continue
+                if (ident, rel) == QUOTE_RAW_HELPER:
+                    continue
+                bad.append((rel, line,
+                            "%s(): its argument uses %s, so the command is built outside the "
+                            "call where this gate cannot see whether it is quoted"
+                            % (m.group(1), ident)))
+    return bad, checked
 
+
+# Holes the gate must keep failing on, each planted alone into a copy of the WebUI.
+# (file, how) - how is a line appended to a .js file, or a function editing the text.
+QUOTING_PLANTS = [
+    ("js", "function p(v){ nm(`uid block ${v}`); }"),
+    ("js", "function p(v){ exec(\"rm \" + v); }"),
+    ("js", "function p(v){ exec(v + \" --x\"); }"),
+    ("js", "function p(v){ const cmd = \"rm -rf \" + v; exec(cmd); }"),
+    ("js", "function p(o){ exec(\"rm -rf \" + o.path); }"),
+    ("js", "function p(v){ nm(\"uid block \" + v.trim()); }"),
+    ("js", "function p(a, v){ nm(`uid block ${a ? `x ${v}` : \"y\"}`); }"),
+    ("js", "function p(v){ exec([\"rm\", v].join(\" \")); }"),
+    ("js", "function p(v){ exec(`rm ${(v)}`); }"),
+    ("html", lambda s: s.replace("</body>", '<button data-act="uidOp" data-arg="$(id)"></button></body>', 1)),
+    ("const", lambda s: re.sub(r"(\bconst\s+CHECK_REQ\s*=\s*)\"[^\"]*\"", r'\1"/x/" + location.hash', s, count=1)),
+]
+
+
+def quoting_selftest():
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    global ROOT
+    real = ROOT
+    missed = []
+    try:
+        for i, (kind, how) in enumerate(QUOTING_PLANTS):
+            with tempfile.TemporaryDirectory() as tmp:
+                shutil.copytree(os.path.join(real, "module/webroot"),
+                                os.path.join(tmp, "module/webroot"))
+                ROOT = tmp
+                base = set(_quoting_findings()[0])
+                if kind == "js":
+                    p = os.path.join(tmp, "module/webroot/js/50-apps.js")
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.write("\n" + how + "\n")
+                else:
+                    rel = "module/webroot/index.html" if kind == "html" else next(
+                        r for r in files("module/webroot/js/*.js") if "CHECK_REQ" in read(r))
+                    p = os.path.join(tmp, rel)
+                    before = read(rel)
+                    after = how(before)
+                    if after == before:
+                        missed.append((i, "plant did not apply"))
+                        continue
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(after)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    found = set(_quoting_findings()[0])
+                if not found - base:
+                    missed.append((i, how if kind == "js" else kind))
+    finally:
+        ROOT = real
+    print("self-test: %d planted hole(s), %d caught"
+          % (len(QUOTING_PLANTS), len(QUOTING_PLANTS) - len(missed)))
+    for i, what in missed:
+        print("  plant %d passed the gate: %s" % (i, what))
+    return 1 if missed else 0
+
+
+def sweep_quoting():
+    bad, checked = _quoting_findings()
     print("root call sites examined    : %d" % checked)
     print("")
     print("=== values reaching a root shell string unquoted ===")
@@ -472,6 +603,7 @@ def main(argv):
     if argv[1] in ("links", "all"):
         rc |= sweep_links()
     if argv[1] in ("quoting", "all"):
+        rc |= quoting_selftest()
         rc |= sweep_quoting()
     return rc
 

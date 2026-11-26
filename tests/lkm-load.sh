@@ -216,5 +216,133 @@ insert_setup
 nm_lkm_insert "$WORK/ins/nomount.ko" bundled >/dev/null 2>&1
 check "an unrecognised second argument is not strict" "$(loader_runs)" "ran"
 
+# The real mapping from "went in" to the return code: in and confirmed is 0, in but
+# the probe is silent is 2. The stub above refuses, so these make each method succeed.
+insert_setup; sed -i 's/^exit 1$/exit 0/' "$NM_LKM_LOADER"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1; _r=$?
+check "ko-loader in, probe silent: returns 2" "$_r" "2"
+insert_setup; sed -i 's/^exit 1$/exit 0/' "$NM_LKM_LOADER"; nm_lkm_probe() { return 0; }
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1; _r=$?
+check "ko-loader in, probe answers: returns 0" "$_r" "0"
+_op0=$PATH
+insert_setup; rm -f "$NM_LKM_LOADER"; mkdir -p "$WORK/ins/bin"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/ins/bin/insmod"; chmod 755 "$WORK/ins/bin/insmod"
+PATH="$WORK/ins/bin:$_op0"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1; _r=$?
+check "insmod in, probe silent: returns 2" "$_r" "2"
+nm_lkm_probe() { return 0; }
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1; _r=$?
+PATH=$_op0
+check "insmod in, probe answers: returns 0" "$_r" "0"
+
+# ksud insmod rewrites vermagic and binds SHN_ABS as ko-loader does, so strict withholds it too.
+ksud_setup() {
+	insert_setup
+	mkdir -p "$WORK/ins/bin"
+	printf '#!/bin/sh\ncase "$1" in -h) echo "  insmod   Load a kernel module" ;; insmod) echo called >> "%s"; exit 1 ;; esac\n' \
+		"$WORK/ins/ksud_ran" > "$WORK/ins/bin/ksud"
+	chmod 755 "$WORK/ins/bin/ksud"
+	rm -f "$WORK/ins/ksud_ran"
+}
+ksud_runs() { [ -s "$WORK/ins/ksud_ran" ] && echo ran || echo skipped; }
+_op=$PATH
+ksud_setup; PATH="$WORK/ins/bin:$_op"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1
+PATH=$_op
+check "without strict, ksud insmod is used" "$(ksud_runs)" "ran"
+ksud_setup; PATH="$WORK/ins/bin:$_op"
+nm_lkm_insert "$WORK/ins/nomount.ko" strict >/dev/null 2>&1
+PATH=$_op
+check "with strict, ksud insmod is NOT used" "$(ksud_runs)" "skipped"
+
+# A load nm cannot confirm already put the engine in: a second load of the same file only
+# runs another init that logs a netlink failure naming the module.
+ksud_setup; sed -i 's/exit 1 ;; esac/exit 0 ;; esac/' "$WORK/ins/bin/ksud"; PATH="$WORK/ins/bin:$_op"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1; _r=$?
+PATH=$_op
+check "an unconfirmed load returns 2 at once" "$_r" "2"
+check "  and no second method runs" "$(loader_runs)" "skipped"
+
+echo
+echo "a kept bundled copy does not shadow an update"
+
+# modinfo-shaped file: NUL-separated key=value strings, as tr reads them on a device.
+mkko() { mkdir -p "$(dirname "$1")"; printf 'nomount_variant=lkm\0vermagic=%s SMP preempt mod_unload aarch64\0' "$2" > "$1"; }
+uname() { echo "6.12.69-android16-6-gdevice-4k"; }
+
+setup "nomount-android16-6.12.ko"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a bundled pick is kept with a marker" \
+	"$([ -f "$WORK/dev/nomount.ko.bundled" ] && echo marked || echo unmarked)" "marked"
+check "  and the marker names the kernel it was picked for" \
+	"$(sed -n 's/^kver=//p' "$WORK/dev/nomount.ko.bundled")" "6.12.69-android16-6-gdevice-4k"
+
+# After an OTA or another kernel, the kept copy is a guess: the bundled set goes first.
+setup "nomount-android16-6.12.ko nomount.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a kept copy from another kernel does not go first" "$PICKED" "nomount-android16-6.12.ko"
+
+setup "nomount.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "with nothing bundled, it is still tried, strict" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko=' | head -1)" "nomount.ko=strict"
+check "  and re-stamped for this kernel once it loads" \
+	"$(sed -n 's/^kver=//p' "$WORK/dev/nomount.ko.bundled")" "6.12.69-android16-6-gdevice-4k"
+
+setup "nomount.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.69-android16-6-gdevice-4k\nstrict=1\n' > "$WORK/dev/nomount.ko.bundled"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a kept guessed-KMI pick stays strict on the same kernel" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko=' | head -1)" "nomount.ko=strict"
+
+setup "nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko"; : > "$WORK/dev/nomount.ko.bundled"; mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_retire_kept
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "after an update the new bundled module loads, not the kept copy" "$NM_LKM_SOURCE" "bundled"
+check "  and the set-aside copy is dropped once the new one is kept" \
+	"$([ -f "$WORK/dev/nomount.ko.prev" ] && echo left || echo dropped)" "dropped"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko"; : > "$WORK/dev/nomount.ko.bundled"; mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_retire_kept
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "if nothing newer loads, the copy from before the update still does" "$NM_LKM_SOURCE" "previous"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko.prev"; rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "the set-aside copy is reachable with no lkm/ at all" "$NM_LKM_SOURCE" "previous"
+
+setup ""
+mkko "$WORK/dev/nomount.ko" "6.12.52-4k"
+nm_lkm_retire_kept
+check "an unmarked copy with a stock GKI vermagic is ours: set aside" \
+	"$([ -f "$WORK/dev/nomount.ko.prev" ] && echo aside || echo kept)" "aside"
+
+setup ""
+mkko "$WORK/dev/nomount.ko" "6.12.69-android16-6-gdevice-4k"
+nm_lkm_retire_kept
+check "a module built for this exact kernel is kernel-supplied: untouched" \
+	"$([ -f "$WORK/dev/nomount.ko" ] && echo kept || echo aside)" "kept"
+
+setup ""
+mkko "$WORK/dev/nomount.ko" "6.12.52-4k"
+nm_lkm_retire_kept recovery
+check "from recovery an unmarked copy is left alone (wrong kernel to compare)" \
+	"$([ -f "$WORK/dev/nomount.ko" ] && echo kept || echo aside)" "kept"
+
+setup ""
+mkdir -p "$WORK/dev"; printf 'vermagic=6.12.52-4k\0' > "$WORK/dev/nomount.ko"
+nm_lkm_retire_kept
+check "an unmarked file that is not a NoMount LKM is never touched" \
+	"$([ -f "$WORK/dev/nomount.ko" ] && echo kept || echo aside)" "kept"
+unset -f uname
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

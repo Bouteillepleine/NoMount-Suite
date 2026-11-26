@@ -30,9 +30,21 @@ uname -r
 
 echo
 echo "== what is really there (root, no guard acts) =="
-"$PROBE"
+root_out=$("$PROBE" 2>&1)
+printf '%s\n' "$root_out"
+root_n=$(printf '%s\n' "$root_out" | sed -n 's|^statmount/listmount: \([0-9]*\) module-rooted.*|\1|p')
 echo "-- mountinfo, for comparison --"
-grep -c '/adb/modules/' /proc/self/mountinfo 2>/dev/null
+root_mi=$(grep -c '/adb/modules/' /proc/self/mountinfo 2>/dev/null)
+echo "$root_mi"
+# With nothing module-rooted mounted at all, "the uid sees none" holds whether or not the
+# filter works, so the comparison below would pass without measuring anything.
+if [ "$root_n" = 0 ] && [ "${root_mi:-0}" = 0 ]; then
+	echo
+	echo "UNMEASURED: root sees no module-rooted mount either, so there is nothing for the"
+	echo "            filter to hide. Run this where a module bind is mounted."
+	echo "RESULT: UNMEASURED (not a pass)"
+	exit 2
+fi
 
 echo
 echo "== as a hide-listed app uid (the guard's only caller) =="
@@ -48,7 +60,7 @@ HID=$("$BIN" uid list 2>/dev/null \
 	| sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
 if [ -z "$HID" ]; then
 	echo "UNMEASURED: no LIVE hide-list uid, so the guard has no caller to measure."
-	echo "            Add one with: $BIN uid add <uid>, then re-run."
+	echo "            Add one with: $BIN uid block <package>, then re-run."
 	exit 2
 fi
 echo "uid: $HID"
@@ -75,6 +87,10 @@ case "$hid_out" in
 *"verdict: unmeasured"*)
 	echo "UNMEASURED: the probe could not read the mount list for that uid"
 	unmeasured=1
+	;;
+*"contradiction(s): listmount offered"*)
+	echo "FAIL  listmount offered that uid ids statmount then refused: the refusal is the tell"
+	fail=1
 	;;
 *"verdict:"*)
 	echo "FAIL  the probe reported a leak for a hide-listed uid"

@@ -16,6 +16,8 @@ css/ and js/ parts are inlined verbatim, so the output is one file.
     python3 scripts/webui-harness.py build     # writes target/webui-harness.html
     python3 scripts/webui-harness.py build --no-driver   # engine absent
     python3 scripts/webui-harness.py shoot     # writes target/shots/*.png, every tab x theme
+    ... build|shoot --fixtures scripts/webui-fixtures/clean.json   # synthetic, no device
+    python3 scripts/webui-harness.py readme    # docs/screenshots from the synthetic set
 
 SHOOT renders at a REAL phone width, which is harder than it looks. Chrome's
 `--window-size` is not the CSS viewport: a host at 125% display scaling lays the page
@@ -37,14 +39,18 @@ attached to a bug report.
 import json
 import os
 import re
+import hashlib
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "target")
 FIXTURES = os.path.join(OUT, "webui-fixtures.json")
+# Committed, hand-made, no device data: what CI and the README screenshots render.
+SYNTHETIC = os.path.join(ROOT, "scripts", "webui-fixtures", "clean.json")
 BIN = "/data/adb/modules/meta-nomount/bin/arm64-v8a"
 
 COMMANDS = {
@@ -53,13 +59,17 @@ COMMANDS = {
     "plan": "%s/nomount plan" % BIN,
     "vfslist": "NM_BIN=%s/nm %s/nomount vfs list" % (BIN, BIN),
     "audit": "cat /data/adb/nomount/audit.json",
+    # Character-for-character the page's command (40-rules.js refreshModules), trailer
+    # included: without `done=1` the page reads every fixture as "could not be read".
     "modules": (
-        'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; id=$(basename "$d"); '
+        'export PATH=/system/bin:/system/xbin:/vendor/bin; '
+        'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; '
+        'id=${d%/}; id=${id##*/}; '
         'mnt=$(NM_P="/adb/modules/$id" awk \'$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); '
         '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; '
         '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; '
-        'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } '
-        '&& st=off; echo "$id|$st|$mnt"; done'
+        'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; '
+        'echo "$id|$st|$mnt"; done; echo "done=1"'
     ),
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
            '$(getprop ro.product.model)|$(getprop ro.build.version.release)|'
@@ -76,6 +86,7 @@ COMMANDS = {
                'case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; '
                'q fp "getprop ro.build.fingerprint"; '
                'q se "getenforce"; '
+               'q bootid "cat /proc/sys/kernel/random/boot_id"; '
                'echo "done=1"',
     "appnm": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
              'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
@@ -86,6 +97,7 @@ COMMANDS = {
     "check": "NM_BIN=%s/nm %s/nomount check --json" % (BIN, BIN),
     "pkgs": "pm list packages -3 -U 2>/dev/null | sort",
     "absorbedlist": (
+        "[ -e /data/adb/nomount/absorbed.list ] || exit 0; "
         "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; "
         "t=${l%%\t*}; s=${l#*\t}; [ \"$t\" = \"$s\" ] && continue; "
         "printf '%s\\t%s\\t%s\\n' \"$t\" \"$s\" "
@@ -93,6 +105,11 @@ COMMANDS = {
         "done < /data/adb/nomount/absorbed.list 2>/dev/null"
     ),
     "whiteoutlist": "NM_BIN=%s/nm %s/nomount whiteout list" % (BIN, BIN),
+    "uidksu": "NM_BIN=%s/nm %s/nomount uid ksu" % (BIN, BIN),
+    "variant": "grep -q update-lkm.json /data/adb/modules/meta-nomount/module.prop "
+               "&& echo lkm || echo lite",
+    "watchpid": "p=$(/system/bin/cat /data/adb/nomount/.checkwatch.pid 2>/dev/null); "
+                'case "$p" in ""|*[!0-9]*) exit 0 ;; esac; [ -d /proc/$p ] && echo 1',
     "isolated": "NM_BIN=%s/nm %s/nomount uid isolated" % (BIN, BIN),
     "bootcount": "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi",
     "modprop": "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop "
@@ -106,7 +123,20 @@ window.__UNMATCHED = [];
 window.ksu = {
   exec: function (cmd, optsJson, cbName) {
     var f = window.__FX, key = null, has = function (s) { return cmd.indexOf(s) >= 0; };
+    // A live checkwatch.sh consumes the request and rewrites audit.json: the write
+    // succeeds, the request is gone when polled, and the next audit read is newer.
+    if (has('request/check')) {
+      var q = has('touch ') ? { out: '', rc: 0 } : { out: '', rc: 1 };
+      if (q.rc === 0) window.__CHECKREQ = Math.floor(Date.now() / 1000);
+      setTimeout(function () {
+        try { window[cbName](q.rc, q.out, ''); } catch (e) { console.error('cb', e); }
+      }, 0);
+      return;
+    }
     if (has('ro.product.cpu.abi')) key = 'abi';
+    else if (has('uid ksu')) key = 'uidksu';
+    else if (has('update-lkm.json')) key = 'variant';
+    else if (has('.checkwatch.pid')) key = 'watchpid';
     else if (has('vfs list')) key = 'vfslist';
     else if (has('audit.json')) key = 'audit';
     else if (has('for d in /data/adb/modules')) key = 'modules';
@@ -133,8 +163,17 @@ window.ksu = {
     // {ok:true, durable:[], auto:[]} and the Hidden-paths chip read "0 · Nothing
     // hidden." A harness written to catch false greens was manufacturing one.
     var r = key && f[key] ? f[key] : { out: '', rc: 1 };
+    if (key === 'audit' && window.__CHECKREQ && r.rc === 0) {
+      try {
+        var a = JSON.parse(r.out);
+        if (typeof a.ts === 'number' && a.ts < window.__CHECKREQ) {
+          a.ts = window.__CHECKREQ;
+          r = { out: JSON.stringify(a), rc: 0, err: r.err || '' };
+        }
+      } catch (e) {}
+    }
     setTimeout(function () {
-      try { window[cbName](r.rc, r.out, ''); } catch (e) { console.error('cb', e); }
+      try { window[cbName](r.rc, r.out, r.err || ''); } catch (e) { console.error('cb', e); }
     }, 0);
   }
 };
@@ -146,7 +185,7 @@ window.addEventListener('error', function (e) {
 // __UNMATCHED and __JSERR were recorded and then read by nothing in the repository, and
 // `shoot`'s only failure condition was a missing PNG - so a page that threw during boot, or
 // asked for a command this stub cannot match, produced clean-looking screenshots and a zero
-// exit. A banner puts them in every shot, and `check` reads them for a non-zero exit.
+// exit. A banner puts them in every shot, and `shoot` exits non-zero when it appears.
 window.__nmDiagBanner = function () {
   var u = window.__UNMATCHED || [], j = window.__JSERR || [];
   var el = document.getElementById('__nm_diag');
@@ -166,6 +205,11 @@ setInterval(window.__nmDiagBanner, 400);
 </script>
 """
 
+def commands_hash():
+    """Stamped into fixtures: a set recorded for other commands cannot reproduce the page."""
+    return hashlib.sha1(json.dumps(COMMANDS, sort_keys=True).encode()).hexdigest()[:12]
+
+
 def capture():
     os.makedirs(OUT, exist_ok=True)
     env = dict(os.environ, MSYS_NO_PATHCONV="1")
@@ -179,8 +223,9 @@ def capture():
         out = p.stdout.rstrip("\n")
         if "daemon started successfully" in out or "adb server is out of date" in out:
             sys.exit("FATAL: adb wrote its own banner into %r -- re-run capture" % key)
-        fx[key] = {"out": out, "rc": p.returncode}
+        fx[key] = {"out": out, "rc": p.returncode, "err": p.stderr.rstrip("\n")}
         print("  %-9s rc=%d %d bytes" % (key, p.returncode, len(out)))
+    fx["__commands"] = commands_hash()
     with open(FIXTURES, "w", encoding="utf-8") as f:
         json.dump(fx, f)
     print("wrote %s -- contains package names and uids, do NOT commit" % FIXTURES)
@@ -232,24 +277,41 @@ def assemble():
     return page
 
 
-def build(no_driver=False):
+def build(no_driver=False, fx_path=None):
+    fx_path = fx_path or FIXTURES
     # Say what is missing. An absent fixtures file used to surface as a bare
     # FileNotFoundError traceback, which reads as a broken script rather than as "run
     # `capture` against a device first".
-    if not os.path.exists(FIXTURES):
+    if not os.path.exists(fx_path):
         print(
             "fatal: no %s\n"
-            "       Run `%s capture` with a device attached first: the fixtures are a\n"
-            "       recording of that device's answers and are deliberately not committed."
-            % (FIXTURES, os.path.basename(__file__)),
+            "       Run `%s capture` with a device attached first (that recording is\n"
+            "       deliberately not committed), or pass --fixtures %s."
+            % (fx_path, os.path.basename(__file__), os.path.relpath(SYNTHETIC, ROOT)),
             file=sys.stderr,
         )
         sys.exit(2)
-    with open(FIXTURES, encoding="utf-8") as f:
+    with open(fx_path, encoding="utf-8") as f:
         fx = json.load(f)
+    if fx.get("__commands") != commands_hash():
+        print("warning: %s was recorded for a different COMMANDS set (%s, now %s), so the\n"
+              "         page may ask for things it does not answer. Re-capture, or update the\n"
+              "         synthetic set." % (fx_path, fx.get("__commands", "unstamped"),
+                                          commands_hash()), file=sys.stderr)
+    if fx.get("__synthetic"):
+        # A fixed timestamp ages into "checked 400d ago", and a fixed suite version into a
+        # report from another Suite; the synthetic report is always fresh and current.
+        for k in ("check", "audit"):
+            if k in fx and fx[k].get("out"):
+                rep = json.loads(fx[k]["out"])
+                rep["ts"] = int(time.time()) - 300
+                rep["suite"] = suite_version()
+                fx[k]["out"] = json.dumps(rep)
     if no_driver:
-        for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated"):
-            fx[k] = {"out": "", "rc": 1}
+        # nm's own wording for a kernel without the engine, which is what the page keys on.
+        for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated", "uidksu"):
+            fx[k] = {"out": "", "rc": 1,
+                     "err": "nm: no NoMount engine in this kernel (errno 93)"}
     page = assemble()
     anchor = 'const SUITE_VERSION = "dev";'
     if page.count(anchor) != 1:
@@ -282,6 +344,10 @@ setTimeout(function () {
   if (%(expand)s) {
     document.querySelectorAll('#tab-%(tab)s .card.collapsed > .card-h.clp')
       .forEach(function (h) { h.click(); });
+    ['toggleRules', 'toggleWhiteouts', 'toggleModules'].forEach(function (a) {
+      var h = document.querySelector('#tab-%(tab)s [data-act=' + a + ']');
+      if (h && h.getAttribute('aria-expanded') !== 'true') h.click();
+    });
   }
 }, %(settle)d);
 </script>
@@ -316,13 +382,15 @@ def shoot(argv):
         return int(argv[argv.index(name) + 1]) if name in argv else default
     width, height = flag("--width", 412), flag("--height", 1860)
     settle = flag("--settle", 900)
+    scale = float(argv[argv.index("--scale") + 1]) if "--scale" in argv else 1.0
+    fixtures = argv[argv.index("--fixtures") + 1] if "--fixtures" in argv else None
     tabs = [t for t in TABS if ("--tab" not in argv or argv[argv.index("--tab") + 1] == t)]
     themes = ["dark", "light"]
     if "--theme" in argv:
         themes = [argv[argv.index("--theme") + 1]]
     expand = "--collapsed" not in argv
 
-    build(False)
+    build(False, fixtures)
     with open(os.path.join(OUT, "webui-harness.html"), encoding="utf-8") as f:
         page = f.read()
 
@@ -343,6 +411,7 @@ def shoot(argv):
     os.makedirs(SHOTS, exist_ok=True)
 
     made = []
+    diag = []
     for tab in tabs:
         for theme in themes:
             name = "%s-%s" % ("checks" if tab == "diag" else tab, theme)
@@ -366,12 +435,21 @@ def shoot(argv):
                 url, out = "file://" + os.path.join(work, hostfile), png
             subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
                             "--allow-file-access-from-files",
+                            "--force-device-scale-factor=%s" % scale,
                             "--virtual-time-budget=%d" % (settle + 5000),
                             "--window-size=%d,%d" % (width + 48, height + 40),
                             "--screenshot=%s" % out, url],
                            capture_output=True)
             if not os.path.isfile(png):
                 sys.exit("shoot: chrome wrote no PNG for %s" % name)
+            page_url = url.replace(hostfile, pagefile)
+            dom = subprocess.run([chrome, "--headless=new", "--disable-gpu",
+                                  "--allow-file-access-from-files",
+                                  "--virtual-time-budget=%d" % (settle + 5000),
+                                  "--dump-dom", page_url],
+                                 capture_output=True, text=True, errors="replace").stdout
+            if 'id="__nm_diag"' in dom:
+                diag.append(name)
             dest = os.path.join(SHOTS, "%s.png" % name)
             if os.path.abspath(png) != os.path.abspath(dest):
                 shutil.copyfile(png, dest)
@@ -379,16 +457,40 @@ def shoot(argv):
             print("  %-16s %s" % (name, dest))
     print("%d shot(s) at %dx%d -- the iframe is the viewport, not the window"
           % (len(made), width, height))
+    if diag:
+        sys.exit("shoot: JS errors or unmatched commands on %s - see the red banner in "
+                 "those PNGs" % ", ".join(diag))
+
+
+README_SHOTS = (("status", "status"), ("hiding", "hiding"), ("rules", "rules"),
+                ("diag", "diagnostics"))
+
+
+def readme():
+    """docs/screenshots from the synthetic set: phone proportions, cards open, dark."""
+    from PIL import Image
+    w, h, scale = 412, 898, 1.5
+    for tab, name in README_SHOTS:
+        shoot(["--tab", tab, "--theme", "dark", "--width", str(w), "--height", str(h),
+               "--scale", str(scale), "--fixtures", SYNTHETIC])
+        src = os.path.join(SHOTS, "%s-dark.png" % ("checks" if tab == "diag" else tab))
+        im = Image.open(src).convert("RGB").crop((0, 0, int(w * scale), int(h * scale)))
+        dest = os.path.join(ROOT, "docs", "screenshots", "%s.jpg" % name)
+        im.save(dest, "JPEG", quality=85, optimize=True)
+        print("  readme %-12s %s %s" % (name, im.size, dest))
 
 
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "build"
+    fx_arg = sys.argv[sys.argv.index("--fixtures") + 1] if "--fixtures" in sys.argv else None
     if what == "capture":
         capture()
     elif what == "build":
-        build("--no-driver" in sys.argv)
+        build("--no-driver" in sys.argv, fx_arg)
     elif what == "shoot":
         shoot(sys.argv[2:])
+    elif what == "readme":
+        readme()
     else:
         print(__doc__)
         sys.exit(2)

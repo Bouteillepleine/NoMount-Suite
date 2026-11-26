@@ -21,7 +21,9 @@ PROBE=${1:-/data/local/tmp/pathhide-probe}
 BIN=${2:-/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount}
 NMC=$(dirname "$BIN")/nm
 fail=0
+unmeasured=0
 note() { echo "NOTE $*"; }
+um()   { echo "NOTE $* - UNMEASURED"; unmeasured=1; }
 ok()   { echo "ok   $*"; }
 bad()  { echo "FAIL $*"; fail=1; }
 
@@ -83,6 +85,10 @@ echo "== does it name itself in the ring buffer? =="
 # lines the module is built to print. Filter the boot report out and keep failing on
 # anything else, which is what the section is actually about.
 #
+# Only hide=1 claims silence. hide=0 also prints a per-surface "... active" line for
+# every guard set through nm_say(), and new ones keep appearing, so on that build the
+# count is reported, not asserted.
+#
 # Keyed on the `nomount: guard <name>` PREFIX, not on the state words. The filter used to
 # spell out (armed|OFF); when NM_GUARD grew a third state the unmatched line would have
 # been counted as a leak and failed this section on every pre-5.10 build. A per-guard
@@ -92,6 +98,8 @@ k=$(dmesg 2>/dev/null | grep 'nomount:' \
 	| grep -c .)
 if [ -e /data/adb/nomount/kmsg ]; then
 	note "kmsg opt-in marker present, so $k line(s) is expected"
+elif [ "$VARIANT" = hide0 ]; then
+	note "$k non-guard 'nomount:' line(s): the hide=0 build prints its boot report"
 elif [ "${k:-0}" = 0 ]; then
 	ok "no 'nomount:' line in dmesg"
 else
@@ -114,7 +122,7 @@ HID=$("$BIN" uid list 2>/dev/null \
 	| grep -E 'live' \
 	| sed -n 's/.*uid \([0-9]\{4,\}\).*/\1/p' | head -1)
 if [ -z "$HID" ]; then
-	note "no LIVE uid on the hide list, so the guards cannot be driven - unmeasured"
+	um "no LIVE uid on the hide list, so the guards cannot be driven"
 else
 	before=$(dmesg 2>/dev/null | wc -l)
 	i=0
@@ -154,28 +162,65 @@ else
 fi
 
 echo "== maps spoof: an injected file must not report its backing dev:ino =="
-APK=$("$NMC" list 2>/dev/null | sed 's/ (.*//; s/ \[UID.*//; s/ -> .*//' | grep -E '\.apk$' | head -1)
+# Read as root, a caller the rule IS served to: a hidden uid gets the stock file, whose
+# maps row is stock without any spoof. The stock invariant is that maps agrees with stat
+# on the same path; the defect is maps naming the backing file under /data/adb.
+RULE=$("$NMC" list 2>/dev/null | grep -E '\.apk -> ' | grep -v '(whiteout)' | head -1)
+APK=$(printf '%s\n' "$RULE" | sed 's/ -> .*//')
+SRC=$(printf '%s\n' "$RULE" | sed 's/.* -> //; s/ (public)$//; s/ \[.*//')
 if [ -z "$APK" ] || [ ! -r "$APK" ] || [ ! -x "$PROBE" ]; then
-	note "no readable injected .apk or no probe - maps spoof UNMEASURED"
+	um "no readable injected .apk or no probe - maps spoof"
 else
+	out=$("$PROBE" "$APK" "$(basename "$APK")" 2>/dev/null)
+	mrows=$(printf '%s\n' "$out" | sed -n 's/^maps  *//p')
+	mdev=$(printf '%s\n' "$out" | sed -n 's/^mapsdev  *//p')
+	mino=$(printf '%s\n' "$out" | sed -n 's/^mapsino  *//p')
+	fino=$(printf '%s\n' "$out" | sed -n 's/^statino  *//p')
 	sdev=$(stat -c '%d' "$APK" 2>/dev/null); sino=$(stat -c '%i' "$APK" 2>/dev/null)
-	ddev=$(stat -c '%d' /data 2>/dev/null)
-	line=$("$PROBE" "$APK" "$(basename "$APK")" 2>/dev/null | sed -n 's/^maps  *//p')
-	note "injected $APK stat dev=$sdev ino=$sino (/data dev=$ddev), maps rows=$line"
-	if [ "$sdev" = "$ddev" ]; then
-		bad "stat already reports the /data device - the rule is not spoofing dev"
+	bino=$(stat -c '%i' "$SRC" 2>/dev/null)
+	# /proc/<pid>/maps prints MAJOR:MINOR in hex; stat %d is the packed decimal dev_t.
+	# Both guarded: a malformed $((...)) ends the whole script in sh.
+	case "$sdev" in ''|*[!0-9]*) sdev=0 ;; esac
+	smaj=$(( ((sdev >> 8) & 0xfff) | ((sdev >> 32) & ~0xfff) ))
+	smin=$(( (sdev & 0xff) | ((sdev >> 12) & ~0xff) ))
+	case "$mdev" in
+	*[!0-9a-f:]* | '' | :* | *: | *:*:*) mmaj=x; mmin=x ;;
+	*) mmaj=$((0x${mdev%%:*})); mmin=$((0x${mdev##*:})) ;;
+	esac
+	note "$APK: maps rows=$mrows dev=$mdev ino=$mino | stat dev=$smaj:$smin ino=$sino | backing ino=${bino:-?}"
+	if [ "${mrows:-0}" = 0 ] || [ "${mino:-0}" = 0 ]; then
+		um "the probe found no maps row for the mapping"
+	elif [ "$mino" != "$sino" ] || [ "$mino" != "$fino" ]; then
+		bad "maps reports ino $mino, stat says $sino (fstat $fino): the two views disagree"
+	elif [ "$mmaj:$mmin" != "$smaj:$smin" ]; then
+		bad "maps reports dev $mmaj:$mmin, stat says $smaj:$smin"
+	elif [ -n "$bino" ] && [ "$mino" = "$bino" ]; then
+		bad "maps and stat both report the backing file's ino $bino"
 	else
-		ok "stat reports a non-/data device, so maps has the stock value to match"
+		ok "maps agrees with stat ($smaj:$smin ino $sino) and does not name the backing ino"
 	fi
 fi
 
 echo "== delegate the maps/pagemap/mincore/map_files set =="
 if [ -r /data/local/tmp/lkm-pathhide.sh ]; then
-	sh /data/local/tmp/lkm-pathhide.sh "$PROBE" "$BIN" || fail=1
+	sh /data/local/tmp/lkm-pathhide.sh "$PROBE" "$BIN"
+	case $? in
+	0) ;;
+	2) unmeasured=1 ;;
+	*) fail=1 ;;
+	esac
 else
-	note "lkm-pathhide.sh not pushed - that set UNMEASURED"
+	um "lkm-pathhide.sh not pushed - that set"
 fi
 
 echo
-[ "$fail" = 0 ] && echo "PASS" || echo "FAILED"
-exit "$fail"
+if [ "$fail" != 0 ]; then
+	echo "RESULT: FAILED"
+	exit 1
+fi
+if [ "$unmeasured" != 0 ]; then
+	echo "RESULT: UNMEASURED (not a pass)"
+	exit 2
+fi
+echo "RESULT: PASS"
+exit 0

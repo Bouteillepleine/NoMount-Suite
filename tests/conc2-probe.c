@@ -142,19 +142,24 @@ static void split_path(const char *p, char *dir, size_t dsz, char *base, size_t 
 }
 
 /* Anomaly bits. Printed as values, never as a bare verdict. */
-#define A_TIME 0x01 /* mtime 0 -> NM_FLAG_HAVE_TIMES was unset at the read */
+#define A_TIME 0x01 /* mtime 0 -> NM_FLAG_HAVE_TIMES was unset (armed by CONC2_EXPECT_TIME) */
 #define A_INO 0x02  /* ino far above anything the control showed */
-#define A_BLK 0x04  /* blksize 0 -> v_blksize placeholder */
+#define A_BLK 0x04  /* blksize below every stock sibling's -> the placeholder's own */
 #define A_CTX 0x08  /* no security.selinux -> v_ctx_len 0 */
 #define A_DENT 0x10 /* parent's d_ino disagrees with stat's st_ino */
 
-/* Overridden by conc2-check.sh, which does NOT pass `control`'s sibling maximum: it
- * passes what the MOUNT issued across the same device. A parent whose direct subdirs
- * happen to be numbered 3..28 would otherwise make any synthesized dir at 29 an
- * "anomaly" while the filesystem itself issues directory inodes up to seven digits.
- * `control` still prints the sibling range -- it is an observation, not the comparand. */
+/* conc2-check.sh sets the ceiling to `control`'s SIBLING_MAX and the slack on top of it
+ * to the parent's entry count plus the runs already made this boot: each run mints one
+ * directory number and the placer never gives it back, so without the run count a
+ * repeated run drifts past the ceiling and reports the fixed defect as reproduced. */
 static uint64_t ino_ceiling = 100000;
 static uint64_t ino_slack = 16;   /* CONC2_INO_SLACK; see flags() */
+/* Both from `control`, like the ceiling. A placeholder v_blksize of 0 is never copied
+ * into kstat, so the inode's own 1<<i_blkbits shows instead (1 on an OP15): the tell is a
+ * value below every stock sibling's, not 0. mtime 0 is only a tell on a parent whose
+ * stock subdirs never show it. */
+static unsigned int blk_stock_lo;
+static int expect_time;
 /* A missing security.selinux is only a tell where the control showed labels at
  * all. Disarmed by default so a filesystem that labels nothing cannot false-PASS
  * this probe -- the same control-calibration the ino ceiling gets. */
@@ -167,7 +172,7 @@ static int flags_of(const struct stx *s)
 	/* mtime alone, not an AND over the three: `control` reports whether stock
 	 * on this parent ever shows mtime 0, so the baseline is measured. The
 	 * window should zero all three; how many it actually zeroed is printed. */
-	if (s->stx_mtime.tv_sec == 0)
+	if (expect_time && s->stx_mtime.tv_sec == 0)
 		f |= A_TIME;
 	/* ceiling + slack, not ceiling. The ceiling is the highest inode this MOUNT has
 	 * issued; the number it issues NEXT is ceiling+1, so flagging that was flagging
@@ -177,7 +182,7 @@ static int flags_of(const struct stx *s)
 	 * many entries the mount holds. */
 	if (s->stx_ino > ino_ceiling + ino_slack)
 		f |= A_INO;
-	if (s->stx_blksize == 0)
+	if (blk_stock_lo && s->stx_blksize < blk_stock_lo)
 		f |= A_BLK;
 	return f;
 }
@@ -445,6 +450,12 @@ int main(int argc, char **argv)
 	env = getenv("CONC2_EXPECT_DENT");
 	if (env)
 		expect_dent = atoi(env) != 0;
+	env = getenv("CONC2_EXPECT_TIME");
+	if (env)
+		expect_time = atoi(env) != 0;
+	env = getenv("CONC2_BLKSIZE_STOCK_LO");
+	if (env)
+		blk_stock_lo = (unsigned int)strtoul(env, NULL, 10);
 
 	if (argc >= 3 && !strcmp(argv[1], "control"))
 		return mode_control(argv[2]);
@@ -457,9 +468,10 @@ int main(int argc, char **argv)
 		"usage: %s control <dir>\n"
 		"       %s watch   <path> <ms>\n"
 		"       %s read    <path>\n"
-		"env:   CONC2_INO_CEILING=<n>  ino above which to flag -- the MOUNT's range,\n"
-		"                              which conc2-check.sh measures; NOT this parent's\n"
-		"                              SIBLING_MAX, which `control` only reports\n"
+		"env:   CONC2_INO_CEILING=<n>  `control`'s SIBLING_MAX\n"
+		"       CONC2_INO_SLACK=<n>    flag only ino > ceiling + slack (entries + runs)\n"
+		"       CONC2_EXPECT_TIME=1    arm the mtime-0 test (stock never shows it)\n"
+		"       CONC2_BLKSIZE_STOCK_LO=<n>  flag blksize below this (from `control`)\n"
 		"       CONC2_EXPECT_CTX=1     arm the missing-secctx test (from `control`)\n"
 		"       CONC2_EXPECT_DENT=1    arm the d_ino/st_ino test (from `control`)\n",
 		argv[0], argv[0], argv[0]);

@@ -14,6 +14,11 @@ on:
         required: false
         default: 'false'
         type: string
+      replace_assets:
+        description: "Replace the zips of an already published version"
+        required: false
+        default: 'false'
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -21,6 +26,12 @@ on:
         required: true
       dry_run:
         description: "Build and validate, but publish nothing"
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      replace_assets:
+        description: "Replace the zips of an already published version (it is immutable otherwise)"
         required: false
         default: 'false'
         type: choice
@@ -59,6 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REPLACE_ASSETS: ${{ inputs.replace_assets }}
         run: |
           set -euo pipefail
           if [ "${DRY_RUN:-}" != 'true' ] \
@@ -80,6 +92,14 @@ jobs:
               echo "       dist/ should hold only release zips at this point." >&2
               exit 1 ;;
           esac
+          lkmzip=$(compgen -G 'dist/01_NoMount-Module-LKM-*.zip' | head -1 || true)
+          case "$lkmzip" in
+            ''|*-debug.zip)
+              echo "FATAL: no 01_ release zip in dist/ - a release ships both flavors, and" >&2
+              echo "       update-lkm.json must name one. Nothing was published." >&2
+              exit 1 ;;
+          esac
+          test -s "$lkmzip"
           zipver="${zip##*00_NoMount-Module-}"
           zipver="${zipver%.zip}"
           if [ "$zipver" != "$TAG" ]; then
@@ -107,11 +127,11 @@ jobs:
             else
               echo "  tag state  : already at $GITHUB_SHA"
             fi
-            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "  release    : $TAG already exists; a real run would REPLACE its asset in place."
-            else
-              echo "  release    : does not exist yet, would be created"
-            fi
+            case "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null || echo none)" in
+              true)  echo "  release    : a draft; a real run would fill it and publish it" ;;
+              false) echo "  release    : already published; a real run keeps it if the zips match, else refuses" ;;
+              *)     echo "  release    : does not exist yet, would be created" ;;
+            esac
             exit 0
           fi
 
@@ -153,35 +173,51 @@ jobs:
             printf '```\n'
           } >> /tmp/notes.md
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists: replacing its asset and notes in place"
-            # --clobber is silent about WHAT it replaced. A release assembled by
-            # hand before the tag was pushed carries different bytes under the
-            # same names, and overwriting them unannounced is how the notes, the
-            # SHA256SUMS asset and the zips end up disagreeing. Name it.
-            _pre="$(mktemp -d)"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$_pre" --pattern '*.zip' --clobber 2>/dev/null || true
-            for _f in "$_pre"/*.zip; do
-              [ -e "$_f" ] || continue
-              _b="$(basename "$_f")"
-              if [ -f "dist/$_b" ] && ! cmp -s "$_f" "dist/$_b"; then
-                echo "::warning::$_b already on the release differs from the one this run built; replacing it"
+          # A draft has no tag yet, so its asset URLs 404 for every device; a published
+          # version is immutable, so its assets are only re-sent when that is asked for.
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+                    -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          case "$state" in
+            none)
+              gh release create "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS \
+                --repo "$GITHUB_REPOSITORY" \
+                --target "$GITHUB_SHA" \
+                --title "NoMount Suite $TAG" \
+                --notes-file /tmp/notes.md
+              ;;
+            draft)
+              echo "release $TAG is a draft: filling it and publishing it at $GITHUB_SHA"
+              gh release upload "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md \
+                --draft=false --target "$GITHUB_SHA"
+              ;;
+            published)
+              _pre="$(mktemp -d)"
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$_pre" --pattern '*.zip' --clobber 2>/dev/null || true
+              _same=1
+              for _f in "$zip" "$lkmzip"; do
+                cmp -s "$_f" "$_pre/$(basename "$_f")" || _same=0
+              done
+              rm -rf "$_pre"
+              if [ "$_same" = 1 ]; then
+                # "Re-run failed jobs" after the update.json push failed: the same build is
+                # live. Its notes are kept, hand trims included, and so is changelog-latest.
+                echo "release $TAG is already published with these exact zips - leaving it as it is"
+                gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/notes.md
+                state=kept
+              elif [ "${REPLACE_ASSETS:-}" = 'true' ]; then
+                echo "::warning::$TAG is published with different zips; replacing them because replace_assets is set"
+                gh release upload "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+                gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
+              else
+                echo "FATAL: $TAG is already published with different zips, and a published version is immutable." >&2
+                echo "       To retry only the update.json step, use 'Re-run failed jobs' on the run that built it." >&2
+                echo "       To replace its assets anyway, dispatch with replace_assets=true." >&2
+                exit 1
               fi
-            done
-            rm -rf "$_pre"
-            gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
-            lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
-            [ -n "$lkmzip" ] && gh release upload "$TAG" "$lkmzip" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release upload "$TAG" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
-          else
-            lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
-            gh release create "$TAG" "$zip" ${lkmzip:+"$lkmzip"} /tmp/SHA256SUMS \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "NoMount Suite $TAG" \
-              --notes-file /tmp/notes.md
-          fi
+              ;;
+          esac
+          echo "$state" > /tmp/publish-state
 
       # The notes quote the hashes, SHA256SUMS carries them, and the zips are
       # the thing itself. Within one run they are built from the same dist/, but
@@ -199,11 +235,14 @@ jobs:
           ( cd "$v" && sha256sum -c SHA256SUMS )
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$v/notes.md"
           bad=0
+          # A kept release shows its live notes, which may have been trimmed by hand.
+          lvl=error
+          [ "$(cat /tmp/publish-state 2>/dev/null)" = kept ] && lvl=warning
           while read -r d n; do
             [ -n "${d:-}" ] || continue
-            grep -qF "$d  $n" "$v/notes.md" || { echo "::error::release notes do not carry the published hash of $n ($d)"; bad=1; }
+            grep -qF "$d  $n" "$v/notes.md" || { echo "::$lvl::release notes do not carry the published hash of $n ($d)"; bad=1; }
           done < "$v/SHA256SUMS"
-          [ "$bad" = 0 ] || exit 1
+          [ "$bad" = 0 ] || [ "$lvl" = warning ] || exit 1
           echo "published assets, SHA256SUMS and notes all agree"
           rm -rf "$v"
 
@@ -234,7 +273,7 @@ jobs:
           # (stamped by package.sh), so without this file its users are offered nothing --
           # and with the two sharing one endpoint they were offered the LITE zip, which has
           # no engine module in it at all.
-          lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1)
+          lkmzip=$(compgen -G 'dist/01_NoMount-Module-LKM-*.zip' | head -1 || true)
           if [ -z "$lkmzip" ]; then
             echo "FATAL: no 01_ zip in dist/, but update-lkm.json must name one" >&2; exit 1
           fi
@@ -253,6 +292,16 @@ jobs:
             "  \"changelog\": \"$raw/docs/changelog-latest.md\"" \
             '}' > /tmp/update-lkm.json
           cat /tmp/update-lkm.json
+
+          # Asked as a device asks: no token. A draft, a private repo or a missing asset all
+          # answer 404 here, and pointing every manager at that is a green run nobody can use.
+          for _z in "$zip" "$lkmzip"; do
+            _u="$base/releases/download/$TAG/$(basename "$_z")"
+            if ! curl -fsSIL --retry 3 --retry-delay 10 -o /dev/null "$_u"; then
+              echo "::error::$_u is not downloadable without a token - update.json left where it is"
+              exit 1
+            fi
+          done
 
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/mainwt
@@ -274,7 +323,7 @@ jobs:
             echo "update.json already current -- nothing to commit."
             exit 0
           fi
-          git -c user.name=Bouteillepleine -c user.email=steve0007.xda@gmail.com \
+          git -c user.name=Bouteillepleine -c user.email=76688492+Bouteillepleine@users.noreply.github.com \
             commit -q -m "update.json -> $TAG"
           _pushed=0
           for _try in 1 2 3 4 5; do

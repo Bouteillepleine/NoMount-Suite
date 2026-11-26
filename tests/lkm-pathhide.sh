@@ -37,6 +37,7 @@
 PROBE=${1:-/data/local/tmp/pathhide-probe}
 BIN=${2:-/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount}
 CTL=/data/local/tmp/ph-control.bin
+# Exits 0 PASS, 1 FAIL, 2 UNMEASURED (nothing programmed, or the list could not be read).
 SUBJ=/data/adb/ph-subject.bin
 fail=0
 
@@ -50,11 +51,18 @@ fail=0
 # itself - so the gate matched nothing, the script exited 0, and a run that had
 # tested nothing read as a pass. The rule table answers the same way on both
 # builds, and an engine without the knob answers nothing at all.
-rules=$("$BIN" pathhide list 2>/dev/null | grep -c '^/')
+# A failed list is not "no rules", and nothing tested is not a pass: both exit 2.
+plist=$("$BIN" pathhide list 2>&1)
+prc=$?
+if [ "$prc" != 0 ]; then
+	echo "UNMEASURED: pathhide list failed (rc $prc): $(printf '%s\n' "$plist" | tail -1)"
+	exit 2
+fi
+rules=$(printf '%s\n' "$plist" | grep -c '^/')
 if [ "${rules:-0}" = 0 ]; then
-	echo "SKIP: no pathhide rule is programmed - either an engine without the"
-	echo "      knob, or the boot-time sync has not run. Nothing to test."
-	exit 0
+	echo "UNMEASURED: no pathhide rule is programmed - either an engine without the"
+	echo "      knob, or the boot-time sync has not run. Nothing was tested."
+	exit 2
 fi
 
 # A hidden LKM takes its own symbols out of kallsyms, so finding the engine there

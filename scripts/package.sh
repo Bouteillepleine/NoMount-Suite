@@ -27,6 +27,9 @@ CLEAN=false
 DEPLOY=false
 REBOOT=false
 DEPLOY_PROFILE="debug"
+# --lite: package only the 00_ zip, the one a contributor without the eight engine
+# modules can build. A release never uses it: CI ships both.
+LITE_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --reboot)  REBOOT=true; shift ;;
         --release) DEPLOY_PROFILE="release"; shift ;;
         --debug)   DEPLOY_PROFILE="debug"; shift ;;
+        --lite)    LITE_ONLY=true; shift ;;
         *)         echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -221,6 +225,16 @@ build_nm() {
         fi
     else
         echo "==> nm: sstrip not built; shipping the unstripped binary" >&2
+    fi
+    # sstrip -z trims p_filesz only; GKI <= 6.6 cannot exec a read-only PT_LOAD left short.
+    local _re
+    _re=$(command -v llvm-readelf || command -v readelf || { [ -x "${cc%/*}/llvm-readelf" ] && echo "${cc%/*}/llvm-readelf"; } || true)
+    if [ -n "$_re" ] && "$_re" -lW "$PROJECT_ROOT/nm-arm64" \
+        | awk '$1=="LOAD" && $7 !~ /W/ && $5 != $6 {bad=1} END{exit !bad}'; then
+        echo "fatal: nm-arm64 has a read-only PT_LOAD with FileSiz < MemSiz after sstrip -z;" >&2
+        echo "       exec of it fails on GKI 6.6 and older. Not packaging it." >&2
+        rm -f "$PROJECT_ROOT/nm-arm64"
+        return 2
     fi
     if ! head -c 4 "$PROJECT_ROOT/nm-arm64" | grep -q 'ELF'; then
         echo "fatal: nm-arm64 is not an ELF after stripping." >&2
@@ -493,7 +507,7 @@ package_zip() {
         if [ "$n_ko" -eq 0 ]; then
             echo "fatal: [$profile] the LKM zip carries NO engine modules." >&2
             echo "       Looked in: ${lkm_src:-$MODULE_DIR/lkm and $PROJECT_ROOT/staging/lkm}" >&2
-            echo "       Build them first, or package only the lite (00_) zip." >&2
+            echo "       Build them first, or pass --lite to package only the 00_ zip." >&2
         else
             echo "fatal: [$profile] the LKM zip carries $n_ko engine module(s), expected $LKM_EXPECT." >&2
             find "$lkm_src" -name 'nomount-*.ko' -printf '         have: %f\n' >&2
@@ -729,14 +743,18 @@ fi
 
 package_zip "debug"   lite
 package_zip "release" lite
-package_zip "debug"   lkm
-package_zip "release" lkm
+if [ "$LITE_ONLY" != true ]; then
+    package_zip "debug"   lkm
+    package_zip "release" lkm
+fi
 
 echo ""
 echo "==> Build complete"
 echo "    Debug:   $RELEASE_DIR/debug/00_NoMount-Module-${VERSION}-debug.zip"
 echo "    Release: $RELEASE_DIR/release/00_NoMount-Module-${VERSION}.zip"
-echo "    LKM:     $RELEASE_DIR/release/01_NoMount-Module-LKM-${VERSION}.zip"
+if [ "$LITE_ONLY" != true ]; then
+    echo "    LKM:     $RELEASE_DIR/release/01_NoMount-Module-LKM-${VERSION}.zip"
+fi
 
 if [ "$DEPLOY" = true ]; then
     if [ "$DEPLOY_PROFILE" = "release" ]; then

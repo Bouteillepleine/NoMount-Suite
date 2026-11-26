@@ -83,8 +83,23 @@ BTSTOCK=$(echo "$CTL" | sed -n 's/^BTIME_ZERO_STOCK=//p')
 if [ "${ZSTOCK:-0}" != 0 ]; then
 	echo
 	echo "STOP: $ZSTOCK stock subdir(s) of $PARENT already have mtime 0, so mtime==0"
-	echo "      is NOT a tell on this parent. Use the ino test alone and say so."
+	echo "      is NOT a tell on this parent. The mtime test is off for this run."
+else
+	export CONC2_EXPECT_TIME=1
 fi
+BLKLO=${BLKSTOCK%%..*}
+case "$BLKLO" in ''|*[!0-9]*|0) ;; *) export CONC2_BLKSIZE_STOCK_LO="$BLKLO" ;; esac
+# Each run mints one directory number and the placer never gives it back, so the run
+# count this boot goes into the slack: without it, about the 27th run on /product/overlay
+# crossed ceiling+slack and reported the fixed defect as reproduced.
+BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+RUNS_F=/data/local/tmp/conc2-runs
+RUNS=0
+[ "$(sed -n 1p "$RUNS_F" 2>/dev/null)" = "$BOOT" ] && RUNS=$(sed -n 2p "$RUNS_F" 2>/dev/null)
+case "$RUNS" in ''|*[!0-9]*) RUNS=0 ;; esac
+RUNS=$((RUNS + 1))
+printf '%s\n%s\n' "$BOOT" "$RUNS" > "$RUNS_F"
+echo "  run:           $RUNS this boot"
 # The comparand is this MOUNT's maximum, and conc2-probe flags only a value the mount
 # could not plausibly issue NEXT -- see CONC2_INO_SLACK below.
 #
@@ -96,10 +111,10 @@ fi
 # ceiling; what was wrong was treating ceiling+1 as an anomaly, when that is exactly the
 # number this mount would hand out next.
 NSIB=$(echo "$CTL" | sed -n 's/^  n_subdirs *//p')
-SLACK=$(( ${NSIB:-0} > 16 ? ${NSIB:-0} : 16 ))
+SLACK=$(( (${NSIB:-0} > 16 ? ${NSIB:-0} : 16) + RUNS ))
 export CONC2_INO_SLACK="$SLACK"
-echo "  ino ceiling:   $CEIL + $SLACK slack (this mount issued $CEIL over ${NSIB:-?} entries;"
-echo "                 ceiling+1 is its next number, a name hash is not)"
+echo "  ino ceiling:   $CEIL + $SLACK slack (this mount issued $CEIL over ${NSIB:-?} entries,"
+echo "                 plus $RUNS run(s) this boot; ceiling+1 is its next number, a name hash is not)"
 export CONC2_INO_CEILING="$CEIL"
 [ "${CTXSTOCK:-0}" != 0 ] && export CONC2_EXPECT_CTX=1
 [ "${DENTSTOCK:-0}" = 0 ] && export CONC2_EXPECT_DENT=1
@@ -108,9 +123,10 @@ else echo "  secctx test:   OFF (stock labels nothing here)"; fi
 if [ -n "$CONC2_EXPECT_DENT" ]; then echo "  d_ino test:    armed (stock d_ino agrees with st_ino here)"
 else echo "  d_ino test:    OFF -- $DENTSTOCK stock subdir(s) ALREADY disagree."
      echo "                 That is overlayfs, not the engine. Not a tell on this parent."; fi
-echo "  stock blksize: $BLKSTOCK   stock btime==0: ${BTSTOCK:-?} of $(echo "$CTL" | sed -n 's/^  n_subdirs *//p')"
-echo "                 (compare these against the injected dir by eye -- they are"
-echo "                  reported, not auto-flagged, because the claim does not name them)"
+if [ -n "$CONC2_BLKSIZE_STOCK_LO" ]; then echo "  blksize test:  armed (stock $BLKSTOCK; flags below $CONC2_BLKSIZE_STOCK_LO)"
+else echo "  blksize test:  OFF (no stock range read: $BLKSTOCK)"; fi
+echo "  stock btime==0: ${BTSTOCK:-?} of $(echo "$CTL" | sed -n 's/^  n_subdirs *//p')"
+echo "                 (compare against the injected dir by eye -- reported, not flagged)"
 
 mkdir -p "$(dirname "$PAYLOAD")"
 echo conc2 > "$PAYLOAD"
@@ -143,7 +159,7 @@ if [ -z "$HID" ]; then
 	echo "        app-reachable. Re-run with: su <appuid> -c '$PROBE read $IPATH'"
 else
 	chmod 755 "$PROBE"
-	su "$HID" -c "CONC2_INO_CEILING=$CEIL $PROBE read $IPATH" | sed -n '/st_ino/p;/st_blksize/p;/st_size/p;/mtime/p;/anomalies/p' | sed 's/^/  /'
+	su "$HID" -c "CONC2_INO_CEILING=$CEIL CONC2_INO_SLACK=$SLACK CONC2_EXPECT_TIME=${CONC2_EXPECT_TIME:-0} CONC2_BLKSIZE_STOCK_LO=${CONC2_BLKSIZE_STOCK_LO:-0} $PROBE read $IPATH" | sed -n '/st_ino/p;/st_blksize/p;/st_size/p;/mtime/p;/anomalies/p' | sed 's/^/  /'
 fi
 
 echo

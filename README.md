@@ -41,7 +41,8 @@ nomount check      # want: verdict: clean, 0 failed, 0 unmeasured
 ```
 
 Needs arm64 and KernelSU (or a fork) or Magisk. SUSFS is not needed. Updates
-are the same flash and keep your settings.
+are the same flash and keep your settings. Magisk has no WebUI, so on Magisk use
+the commands below from a root shell.
 
 ## Safe Guard boot
 
@@ -52,12 +53,22 @@ park it by hand from recovery:
 mkdir -p /data/adb/nomount && touch /data/adb/nomount/disabled
 ```
 
+### If it parked itself
+
+Nothing is injected until you re-arm it. `/data/adb/nomount/incident.log` says
+why it parked; copy it first (WebUI: **Checks → Copy incident**). Then re-arm in
+**Checks → Bootloop guard**, or from a root shell, and reboot:
+
+```sh
+rm /data/adb/nomount/disabled /data/adb/nomount/bootcount
+```
+
 ## Commands
 
 The WebUI does all of this. From a shell: `nomount check`, `reload`,
 `uid block <pkg>`, `whiteout add <path>`, `export`. `nomount --help` has the
-rest. To report a problem, attach what **Checks → Developer tools → Export**
-writes.
+rest. To report a problem, paste what **Checks → Copy report** copies; if we
+need more, **Checks → Developer tools → Export** writes a zip to attach.
 
 To hide one rule from named apps, rather than from everyone:
 
@@ -70,11 +81,19 @@ app under every user, work profile included. To hide an **absorbed APK** the sam
 way, list those apps in `/data/adb/nomount/apkscope`, one per line — absent means
 off, which is the default.
 
+A rule added this way lasts until the next reboot: nothing writes it to disk. For
+content that must come back every boot, ship it in a module.
+
 ## Building
 
 ```sh
-cargo test && ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --version vX.Y.Z
+cargo test && ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --lite
 ```
+
+That builds the 00_ zip, for a kernel with NoMount built in. Without `--lite`,
+`package.sh` also packages the 01_ zip and stops unless the eight
+`module/lkm/nomount-*.ko` from CI's `build.yaml` are there; a release build
+(`--version vX.Y.Z`) also needs `module/bin/ko-loader-arm64`.
 
 ## License and credits
 

@@ -5,24 +5,21 @@
 # it is what shipping this without the flags did.
 set -euo pipefail
 
+# Per token, not per line: `defined(CONFIG_A) && !defined(CONFIG_B)` gates A positively,
+# and a symbol seen in both forms is still asserted for its positive use.
+NEG_RE='(ifndef[[:space:]]+|![[:space:]]*(defined[[:space:]]*\(?|IS_ENABLED\()[[:space:]]*)CONFIG_[A-Z0-9_]+'
+
 extract_positive() {
-    local cond ie all neg
+    local cond ie
     cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" || true)
-    ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' "$@" || true)
-    all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
-    neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*(defined|IS_ENABLED))' \
-          | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
-    [ -n "$all" ] || return 0
-    if [ -n "$neg" ]; then
-        comm -23 <(printf '%s\n' "$all") <(printf '%s\n' "$neg")
-    else
-        printf '%s\n' "$all"
-    fi
+    ie=$(sed -E "s/$NEG_RE//g" "$@" | grep -oE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' || true)
+    printf '%s\n%s\n' "$(printf '%s\n' "$cond" | sed -E "s/$NEG_RE//g")" "$ie" \
+        | { grep -oE 'CONFIG_[A-Z0-9_]+' || true; } | sort -u
 }
 
 extract_negative() {
-    grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" 2>/dev/null \
-        | { grep -E '(ifndef|![[:space:]]*(defined|IS_ENABLED))' || true; } \
+    { grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" 2>/dev/null || true; } \
+        | { grep -oE "$NEG_RE" || true; } \
         | { grep -oE 'CONFIG_[A-Z0-9_]+' || true; } | sort -u
 }
 
@@ -51,16 +48,20 @@ cat > "$T/a.c" <<'EOF'
   x = IS_ENABLED(CONFIG_G);
 #if defined(CONFIG_H) && defined(CONFIG_I)
 #elif IS_ENABLED(CONFIG_J)
+#if defined(CONFIG_M) && !defined(CONFIG_N)
+#if IS_ENABLED(CONFIG_P) && !IS_ENABLED(CONFIG_Q)
+#ifdef CONFIG_R
+#ifndef CONFIG_R
 int nothing = CONFIG_NOT_A_GATE;
 EOF
 : > "$T/a.h"
 
 check "every positive gating form is seen" \
       "$(extract_positive "$T/a.c" "$T/a.h" | tr '\n' ' ')" \
-      "CONFIG_A CONFIG_C CONFIG_D CONFIG_F CONFIG_G CONFIG_H CONFIG_I CONFIG_J "
+      "CONFIG_A CONFIG_C CONFIG_D CONFIG_F CONFIG_G CONFIG_H CONFIG_I CONFIG_J CONFIG_M CONFIG_P CONFIG_R "
 check "negative gating forms are reported, not asserted" \
       "$(extract_negative "$T/a.c" "$T/a.h" | tr '\n' ' ')" \
-      "CONFIG_B CONFIG_E CONFIG_K "
+      "CONFIG_B CONFIG_E CONFIG_K CONFIG_N CONFIG_Q CONFIG_R "
 
 cat > "$T/b.c" <<'EOF'
 #ifndef EROFS_SUPER_MAGIC_V1
@@ -77,6 +78,7 @@ check "a file with no negative gate yields none" \
 # Run both extractors under those exact flags against a source with no gate at
 # all - the case the real engine hits today.
 if bash -euo pipefail -c "
+    NEG_RE='$NEG_RE'
     $(declare -f extract_positive)
     $(declare -f extract_negative)
     extract_positive '$T/b.c' '$T/b.h' >/dev/null

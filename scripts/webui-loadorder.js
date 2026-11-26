@@ -112,12 +112,17 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   for (let i = 0; i < 20; i++) {
     await tick();
   }
-  const refErrs = seen.errors.filter((e) =>
-    /is not defined|before initialization/.test(e));
-  if (refErrs.length) {
-    console.error('async load-order errors:');
-    for (const e of refErrs) {
+  // Anything but a toast is a fault. A TypeError inside an async boot step arrives as an
+  // unhandledRejection, and every command the page would have built after it goes
+  // unparsed; only ReferenceErrors used to fail here.
+  const faults = seen.errors.filter((e) => !e.startsWith('toast: '));
+  if (faults.length) {
+    console.error('errors during the simulated boot:');
+    for (const e of faults) {
       console.error('  ' + e);
+    }
+    if (faults.some((e) => /is not defined|before initialization/.test(e))) {
+      console.error('  -> a part reads a binding declared in a LATER part; reorder them');
     }
     process.exit(1);
   }
@@ -127,6 +132,14 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   // on a device. This is what the gate was missing: it is cheap, and it fails loudly.
   if (!execCalls.length) {
     console.error('the page never asked the bridge to run anything, so nothing was checked');
+    process.exit(1);
+  }
+  // The simulated boot builds this many at the last count. Fewer means a step died part-way
+  // and everything after it went unchecked. Lower it only when the page really asks for less.
+  const MIN_BOOT_CALLS = 20;
+  if (execCalls.length < MIN_BOOT_CALLS) {
+    console.error('the boot built only ' + execCalls.length + ' command(s), expected at least ' +
+                  MIN_BOOT_CALLS + ': something stopped it part-way');
     process.exit(1);
   }
   const { spawnSync } = require('child_process');

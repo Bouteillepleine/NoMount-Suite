@@ -182,11 +182,14 @@ int main(void)
 	 * clean verdict must not be read as "statmount is closed". The prefix stays
 	 * exactly "verdict: clean" because statmount-check.sh globs for it.
 	 */
-	if (leaked == 0)
+	if (leaked == 0 && contradictions == 0)
 		printf("verdict: clean (offered ids only -- the EPERM-vs-ENOENT sweep of "
 		       "unreturned ids is NOT covered; see lkm/nm_mount_filter.c)\n");
+	else if (leaked == 0)
+		printf("verdict: %d contradiction(s): listmount offered ids statmount refused\n",
+		       contradictions);
 	else
 		printf("verdict: %d leak(s)%s\n", leaked,
 		       contradictions ? " and a disagreement with mountinfo" : "");
-	return leaked ? 1 : 0;
+	return (leaked || contradictions) ? 1 : 0;
 }

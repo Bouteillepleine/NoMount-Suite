@@ -2,7 +2,7 @@
 
 - Emoji and zero-width filenames work again for hidden apps.
 - Synthesized directories no longer flash a wrong inode and block size while being built.
-- They now report a creation time and answer ioctls, like real ones.
+- They now report a creation time where the ROM has one. Directories the engine takes over answer ioctls like stock ones; the ones it creates still refuse them.
 - The engine's build version moves when the engine does, so a rebuilt kernel is identifiable.
 - The LKM arms its guards and hides itself on 4.9 and 4.14; it did neither.
 - A `ghostpaths` bind root is hidden from mountinfo on the LKM too.

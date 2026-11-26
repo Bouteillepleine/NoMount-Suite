@@ -12,9 +12,13 @@
 static int failures;
 
 static void expect(const char *arg, int ok, int n, const unsigned int *want) {
-    unsigned int got[NM_DENY_MAX];
+    /* One slot past NM_DENY_MAX with a canary in it: a parser that writes past the
+     * bound fails here instead of quietly damaging the stack. */
+    unsigned int got[NM_DENY_MAX + 1];
+    got[NM_DENY_MAX] = 0xC0FFEE01u;
     int got_n = 0, rc = parse_appid_list(arg, got, NM_DENY_MAX, &got_n), bad = 0;
 
+    if (got[NM_DENY_MAX] != 0xC0FFEE01u) bad = 1;
     if (ok ? rc != 0 : rc == 0) bad = 1;
     if (ok && !rc) {
         if (got_n != n) bad = 1;
@@ -52,6 +56,7 @@ void c_main(long *sp) {
     /* our appid list, unchanged */
     expect("10397,10170", 1, 2, pair);
     expect("10000,10001,10002,10003,10004,10005,10006,10007", 1, 8, eight);
+    expect("10000,10001,10002,10003,10004,10005,10006,10007,10008", 0, 0, 0); /* 9: over */
     expect("1000", 1, 1, a1000);
     expect("10397,10397", 0, 0, 0);
     expect("100000", 0, 0, 0);

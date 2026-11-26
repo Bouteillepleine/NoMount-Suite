@@ -5,8 +5,9 @@ on:
   workflow_dispatch:
   push:
     branches: [prerelease, main]
+    # No Markdown here: the tests pin README.md, CHANGELOG.md and the bug template,
+    # so an edit to one of them alone has to run them.
     paths-ignore:
-      - '**.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitattributes'
@@ -14,7 +15,6 @@ on:
   pull_request:
     branches: [prerelease, main]
     paths-ignore:
-      - '**.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitattributes'
@@ -80,7 +80,7 @@ jobs:
 
       # Only the `quoting` sweep. `links` is exploratory and reports 26 unmatched
       # patterns on a clean tree, so wiring `all` would fail every run; this one is
-      # clean and was proven to fail against five planted holes.
+      # clean, and it re-plants its known holes and fails if one gets through.
       - name: WebUI root-call quoting
         run: python3 scripts/contract-sweep.py quoting
 
@@ -234,6 +234,32 @@ jobs:
           set -eu
           test -s "$KDIR/Module.symvers" || {
             echo "::error::no Module.symvers in the DDK tree"; exit 1; }
+          # The DDK images build modpost with check_exports() commented out, so a module built
+          # with it gets an empty __versions: no CRC is checked when it loads, and every load
+          # logs "no symbol version for module_layout" naming it. Rebuild modpost from the
+          # image's own source with that line restored, using the tree's recorded compile and
+          # link commands, and put it in place of the image's. Newer images also comment out
+          # `s->module = exp->module;`, which leaves every CRC out. 5.10 and 5.15 carry modpost's
+          # flags (-m among them) in MODPOST itself, so overriding MODPOST drops them. 6.3+
+          # records the commands as savedcmd_. An unpatched image keeps its own.
+          mp_cmd_src=$(sed -n 's|^[a-z]*cmd_scripts/mod/modpost\.o := .* \([^ ]*/scripts/mod/modpost\.c\)$|\1|p' \
+                       "$KDIR/scripts/mod/.modpost.o.cmd" 2>/dev/null)
+          case "$mp_cmd_src" in /*|'') mp_src=$mp_cmd_src ;; *) mp_src="$KDIR/$mp_cmd_src" ;; esac
+          if [ -n "$mp_src" ] && grep -qE '^[[:space:]]*//[[:space:]]*check_exports\(mod\);' "$mp_src"; then
+            mp_stock="${mp_src%.c}.stock.c"
+            sed -E -e 's#^[[:space:]]*//[[:space:]]*(check_exports\(mod\);)#\t\1#' \
+                   -e 's#^[[:space:]]*//([[:space:]]*s->module = exp->module;)#\1#' "$mp_src" > "$mp_stock"
+            mp_out=$(mktemp -d)
+            mp_cc=$(sed -n 's|^[a-z]*cmd_scripts/mod/modpost\.o := ||p' "$KDIR/scripts/mod/.modpost.o.cmd" \
+                    | sed -e 's|-Wp,-MMD,[^ ]*||' -e "s| -o scripts/mod/modpost\.o | -o $mp_out/modpost.o |" \
+                          -e "s|$mp_cmd_src|$mp_stock|")
+            mp_ld=$(sed -n 's|^[a-z]*cmd_scripts/mod/modpost := ||p' "$KDIR/scripts/mod/.modpost.cmd" \
+                    | sed -e "s| -o scripts/mod/modpost | -o $mp_out/modpost |" \
+                          -e "s| scripts/mod/modpost\.o | $mp_out/modpost.o |")
+            (cd "$KDIR" && eval "$mp_cc" && eval "$mp_ld")
+            install -m755 "$mp_out/modpost" "$KDIR/scripts/mod/modpost"
+            echo "modpost rebuilt from $mp_src with check_exports() restored"
+          fi
           make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
                M="$GITHUB_WORKSPACE/lkm" modules
           install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
@@ -260,6 +286,19 @@ jobs:
             fi
             break
           done
+          # A MODVERSIONS kernel accepts a module whose __versions is empty, checking no CRC at
+          # all. That is how the 6.1+ modules shipped; refuse to ship one again.
+          if grep -qs '^CONFIG_MODVERSIONS=y' "$KDIR/.config" "$KDIR/include/config/auto.conf"; then
+            for _re in llvm-readelf readelf; do command -v "$_re" >/dev/null 2>&1 && break; done
+            vhex=$("$_re" -SW "out/nomount-${{ matrix.kmi }}.ko" \
+                   | awk '{for (i = 1; i <= NF; i++) if ($i == "__versions") { print $(i + 4); exit }}')
+            vlen=$(printf '%d' "0x${vhex:-0}")
+            if [ "$vlen" -eq 0 ]; then
+              echo "::error::nomount-${{ matrix.kmi }}.ko has no symbol CRCs (__versions size ${vhex:-missing}) on a MODVERSIONS kernel"
+              exit 1
+            fi
+            echo "__versions: $((vlen / 64)) CRC entries"
+          fi
           ls -l "out/nomount-${{ matrix.kmi }}.ko"
 
       - name: Is this module actually built for the KMI its name claims?
@@ -333,6 +372,30 @@ jobs:
             "$RE" -rW "$KO" | awk -v t="$t" '$3==t && NF>=5 {print "  " t "  " $5}' | sort -u
           done
           exit 1
+
+      - name: No CFI check on calls into kallsyms-resolved bodies
+        run: |
+          set -eu
+          OD=$(command -v llvm-objdump || true)
+          [ -n "$OD" ] || { echo "::error::no llvm-objdump in this image"; exit 1; }
+          # A body found through kallsyms is not a CFI jump-table entry: a checked call to it
+          # panics CFI_CLANG kernels (5.10/5.15) at init. lkm/nomount.ko is the linked module
+          # before the strip; with LTO its .o files are bitcode, and names may carry a suffix.
+          dis=$("$OD" -dr --no-show-raw-insn lkm/nomount.ko)
+          for fn in nm_oot_lookup_opt nm_ph_hole; do
+            body=$(printf '%s\n' "$dis" | awk -v f="$fn" '
+              /^[0-9a-f]+ <.*>:$/ { inb = ($0 ~ ("<" f "(\\.[^>]*)?>:$")) }
+              inb { print }')
+            [ -n "$body" ] || {
+              echo "::error::$fn not found in lkm/nomount.ko, so this gate measured nothing"; exit 1; }
+            printf '%s\n' "$body" | grep -qE '(^|[[:space:]])(blr|br)[[:space:]]+x[0-9]+' || {
+              echo "::error::$fn has no indirect branch left to check"; exit 1; }
+            if printf '%s\n' "$body" | grep -qE '__cfi_slowpath|brk[[:space:]]+#0x82'; then
+              echo "::error::$fn checks CFI on its call into a kallsyms-resolved body - mark it __nocfi"
+              exit 1
+            fi
+            echo "$fn: indirect call with no CFI check"
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -420,6 +483,9 @@ jobs:
           make -C /tmp/kol TARGET=aarch64-linux
           make -C userspace/tools/sstrip
           userspace/tools/sstrip/sstrip -z /tmp/kol/lkmloader
+          # sstrip -z trims p_filesz only. A non-writable PT_LOAD left with FileSiz < MemSiz makes
+          # GKI <= 6.6 fault in padzero() after exec's point of no return, so the binary never runs.
+          readelf -lW /tmp/kol/lkmloader | awk '$1=="LOAD" && $7 !~ /W/ && $5 != $6 {print "::error::ko-loader: sstrip -z left a read-only PT_LOAD short: " $0; bad=1} END{exit bad}'
           install -Dm755 /tmp/kol/lkmloader module/bin/ko-loader-arm64
           # `file` ran here and its output was printed, never tested. `set -eu` catches a
           # make that FAILS, but not one that succeeds with the wrong architecture: TARGET
@@ -441,6 +507,13 @@ jobs:
             tests/nm-parse-check.c -o "$RUNNER_TEMP/nm-parse-check"
           "$RUNNER_TEMP/nm-parse-check"
 
+      - name: Check nm's argv end to end against a fake engine
+        run: |
+          zig cc -target x86_64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -Wno-invalid-noreturn -Wl,--entry=_start \
+            -DNM_TEST_FD=3 userspace/src/nm.c -o "$RUNNER_TEMP/nm-test"
+          python3 tests/nm-argv-check.py "$RUNNER_TEMP/nm-test"
+
       - name: Build nm (freestanding netlink client)
         run: |
           make -C userspace/tools/sstrip
@@ -448,6 +521,7 @@ jobs:
             -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
             userspace/src/nm.c -o nm-arm64
           userspace/tools/sstrip/sstrip -z nm-arm64
+          readelf -lW nm-arm64 | awk '$1=="LOAD" && $7 !~ /W/ && $5 != $6 {print "::error::nm: sstrip -z left a read-only PT_LOAD short (exec fails on GKI <= 6.6): " $0; bad=1} END{exit bad}'
           file nm-arm64; wc -c nm-arm64
           for profile in debug release; do
             install -Dm755 nm-arm64 "target/aarch64-linux-android/${profile}/nm"
@@ -470,6 +544,7 @@ jobs:
           path: |
             release/release/00_NoMount-Module-*.zip
             release/release/01_NoMount-Module-LKM-*.zip
+          if-no-files-found: error
           retention-days: 30
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,0 +1,120 @@
+{
+ "__about": "Synthetic WebUI fixtures: hand-made, no device data. See webui-harness.py.",
+ "__synthetic": true,
+ "__commands": "32e054619310",
+ "abi": {
+  "out": "arm64-v8a",
+  "rc": 0,
+  "err": ""
+ },
+ "engver": {
+  "out": "36 1.36.3",
+  "rc": 0,
+  "err": ""
+ },
+ "plan": {
+  "out": "inject   /system/fonts/ExampleSans-Regular.ttf <- /data/adb/modules/example-fonts/system/fonts/ExampleSans-Regular.ttf [example-fonts]\ninject   /system/fonts/ExampleSans-Bold.ttf <- /data/adb/modules/example-fonts/system/fonts/ExampleSans-Bold.ttf [example-fonts]\ninject   /system/fonts/ExampleMono-Regular.ttf <- /data/adb/modules/example-fonts/system/fonts/ExampleMono-Regular.ttf [example-fonts]\ninject   /system/media/audio/ui/Effect_Tick.ogg <- /data/adb/modules/example-sounds/system/media/audio/ui/Effect_Tick.ogg [example-sounds]\ninject   /system/media/audio/ui/Lock.ogg <- /data/adb/modules/example-sounds/system/media/audio/ui/Lock.ogg [example-sounds]\ninject   /product/overlay/ExampleAccentBlue.apk <- /data/adb/modules/example-overlays/product/overlay/ExampleAccentBlue.apk [example-overlays]\ninject   /product/overlay/ExampleIconShapes.apk <- /data/adb/modules/example-overlays/product/overlay/ExampleIconShapes.apk [example-overlays]\ninject   /product/overlay/ExampleNavbar.apk <- /data/adb/modules/example-overlays/product/overlay/ExampleNavbar.apk [example-overlays]\ninject   /product/overlay/ExampleStatusbar.apk <- /data/adb/modules/example-overlays/product/overlay/ExampleStatusbar.apk [example-overlays]\ninject   /product/etc/permissions/com.example.feature.xml <- /data/adb/modules/example-features/product/etc/permissions/com.example.feature.xml [example-features]",
+  "rc": 0,
+  "err": ""
+ },
+ "vfslist": {
+  "out": "/system/fonts/ExampleSans-Regular.ttf -> /data/adb/modules/example-fonts/system/fonts/ExampleSans-Regular.ttf\n/system/fonts/ExampleSans-Bold.ttf -> /data/adb/modules/example-fonts/system/fonts/ExampleSans-Bold.ttf\n/system/fonts/ExampleMono-Regular.ttf -> /data/adb/modules/example-fonts/system/fonts/ExampleMono-Regular.ttf\n/system/media/audio/ui/Effect_Tick.ogg -> /data/adb/modules/example-sounds/system/media/audio/ui/Effect_Tick.ogg\n/system/media/audio/ui/Lock.ogg -> /data/adb/modules/example-sounds/system/media/audio/ui/Lock.ogg\n/product/overlay/ExampleAccentBlue.apk -> /data/adb/modules/example-overlays/product/overlay/ExampleAccentBlue.apk (public)\n/product/overlay/ExampleIconShapes.apk -> /data/adb/modules/example-overlays/product/overlay/ExampleIconShapes.apk (public)\n/product/overlay/ExampleNavbar.apk -> /data/adb/modules/example-overlays/product/overlay/ExampleNavbar.apk (public)\n/product/overlay/ExampleStatusbar.apk -> /data/adb/modules/example-overlays/product/overlay/ExampleStatusbar.apk (public)\n/product/etc/permissions/com.example.feature.xml -> /data/adb/modules/example-features/product/etc/permissions/com.example.feature.xml\n/system/app/ExampleBloat (whiteout)\n/product/app/ExampleStore (whiteout)",
+  "rc": 0,
+  "err": ""
+ },
+ "audit": {
+  "out": "{\"kind\": \"check\", \"ts\": 0, \"suite\": \"0\", \"engine\": 36, \"rules\": 12, \"directories\": 0, \"sections\": [\"plan\", \"device\"], \"verdict\": \"clean\", \"boot\": \"4f1c2a90-7b3e-4d55-9a61-0c8e2f6b1d37\", \"cache_kept_ts\": null, \"summary\": {\"fail\": 0, \"reboot\": 0, \"unmeasured\": 0, \"warn\": 0, \"pass\": 15, \"not_applicable\": 0, \"note\": 3, \"open_failures\": 0, \"complete\": true}, \"facts\": [], \"checks\": [{\"id\": \"engine-responding\", \"name\": \"engine responding\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"engine v36 (1.36.3) answered with 12 live rule(s)\", \"meaning\": \"engine v36 (1.36.3) answered with 12 live rule(s)\", \"oracle\": null, \"owner\": null}, {\"id\": \"boot-guard-armed\", \"name\": \"boot guard armed\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"The Suite is enabled; no boot-failure guard has tripped.\", \"meaning\": \"The Suite is enabled; no boot-failure guard has tripped.\", \"oracle\": null, \"owner\": null}, {\"id\": \"served-bytes-match-the-rule\", \"name\": \"served bytes match the rule\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"10 of 10 injected file(s) read back the bytes their rule serves\", \"meaning\": \"10 of 10 injected file(s) read back the bytes their rule serves\", \"oracle\": null, \"owner\": null}, {\"id\": \"pm-published-files-open-for-a-hidden-app\", \"name\": \"PM-published files open for a hidden app\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"uid 10213 (hidden) opened all 4 PM-published rule target(s): same size, first and last 4 KiB as the file each rule serves from\", \"meaning\": \"uid 10213 (hidden) opened all 4 PM-published rule target(s): same size, first and last 4 KiB as the file each rule serves from\", \"oracle\": null, \"owner\": null}, {\"id\": \"xattr-agrees-with-open-for-a-hidden-app\", \"name\": \"xattr agrees with open for a hidden app\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"labels and opens agree for uid 10213 (hidden) on every sampled path\", \"meaning\": \"labels and opens agree for uid 10213 (hidden) on every sampled path\", \"oracle\": null, \"owner\": null}, {\"id\": \"per-uid-consistency-canary\", \"name\": \"per-UID consistency canary\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"a hidden uid and a served uid saw what their rules say\", \"meaning\": \"a hidden uid and a served uid saw what their rules say\", \"oracle\": null, \"owner\": null}, {\"id\": \"readdir-ino-vs-stat-ino\", \"name\": \"readdir ino vs stat ino\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"every listed injected entry reports the same ino to readdir and stat\", \"meaning\": \"every listed injected entry reports the same ino to readdir and stat\", \"oracle\": null, \"owner\": null}, {\"id\": \"synthesized-inode-collision\", \"name\": \"synthesized inode collision\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no injected entry shares (dev, ino) with a stock one\", \"meaning\": \"no injected entry shares (dev, ino) with a stock one\", \"oracle\": null, \"owner\": null}, {\"id\": \"erofs-directory-shape\", \"name\": \"erofs directory shape\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"injected directories size and order like their erofs siblings\", \"meaning\": \"injected directories size and order like their erofs siblings\", \"oracle\": null, \"owner\": null}, {\"id\": \"overlay-dir-inode-range\", \"name\": \"overlay dir inode range\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"/product/overlay entries sit inside the range its stock siblings use\", \"meaning\": \"/product/overlay entries sit inside the range its stock siblings use\", \"oracle\": null, \"owner\": null}, {\"id\": \"injected-files-in-maps\", \"name\": \"injected files in maps\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"a mapped injected file reports the ROM's dev:ino in maps\", \"meaning\": \"a mapped injected file reports the ROM's dev:ino in maps\", \"oracle\": null, \"owner\": null}, {\"id\": \"kernel-surfaces\", \"name\": \"kernel surfaces\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"the engine's kernel surfaces answer as stock\", \"meaning\": \"the engine's kernel surfaces answer as stock\", \"oracle\": null, \"owner\": null}, {\"id\": \"zero-mount-posture\", \"name\": \"zero-mount posture\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no module mounts in this namespace\", \"meaning\": \"no module mounts in this namespace\", \"oracle\": null, \"owner\": null}, {\"id\": \"tmpfs-over-the-rom\", \"name\": \"tmpfs over the ROM\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no tmpfs mounted over a ROM path\", \"meaning\": \"no tmpfs mounted over a ROM path\", \"oracle\": null, \"owner\": null}, {\"id\": \"foreign-mount-over-the-rom\", \"name\": \"foreign mount over the ROM\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no other module mounts over a ROM path\", \"meaning\": \"no other module mounts over a ROM path\", \"oracle\": null, \"owner\": null}, {\"id\": \"ghost-cloak-verified-on-this-kernel\", \"name\": \"ghost cloak verified on this kernel\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"3 of 3 sampled hidden path(s) look exactly like paths that never existed, to hidden uid 10213. Measured, not assumed.\", \"meaning\": \"3 of 3 sampled hidden path(s) look exactly like paths that never existed, to hidden uid 10213. Measured, not assumed.\", \"oracle\": null, \"owner\": null}, {\"id\": \"isolated-process-pools-hiding\", \"name\": \"isolated-process pools\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"both - every isolated process of a hidden app is hidden too (default)\", \"meaning\": \"both - every isolated process of a hidden app is hidden too (default)\", \"oracle\": null, \"owner\": null}, {\"id\": \"directory-holds-only-injected-files\", \"name\": \"directory holds only injected files\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"/system/fonts holds stock files beside the 3 injected ones\", \"meaning\": \"/system/fonts holds stock files beside the 3 injected ones\", \"oracle\": null, \"owner\": null}]}",
+  "rc": 0,
+  "err": ""
+ },
+ "check": {
+  "out": "{\"kind\": \"check\", \"ts\": 0, \"suite\": \"0\", \"engine\": 36, \"rules\": 12, \"directories\": 0, \"sections\": [\"plan\", \"device\"], \"verdict\": \"clean\", \"boot\": \"4f1c2a90-7b3e-4d55-9a61-0c8e2f6b1d37\", \"cache_kept_ts\": null, \"summary\": {\"fail\": 0, \"reboot\": 0, \"unmeasured\": 0, \"warn\": 0, \"pass\": 15, \"not_applicable\": 0, \"note\": 3, \"open_failures\": 0, \"complete\": true}, \"facts\": [], \"checks\": [{\"id\": \"engine-responding\", \"name\": \"engine responding\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"engine v36 (1.36.3) answered with 12 live rule(s)\", \"meaning\": \"engine v36 (1.36.3) answered with 12 live rule(s)\", \"oracle\": null, \"owner\": null}, {\"id\": \"boot-guard-armed\", \"name\": \"boot guard armed\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"The Suite is enabled; no boot-failure guard has tripped.\", \"meaning\": \"The Suite is enabled; no boot-failure guard has tripped.\", \"oracle\": null, \"owner\": null}, {\"id\": \"served-bytes-match-the-rule\", \"name\": \"served bytes match the rule\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"10 of 10 injected file(s) read back the bytes their rule serves\", \"meaning\": \"10 of 10 injected file(s) read back the bytes their rule serves\", \"oracle\": null, \"owner\": null}, {\"id\": \"pm-published-files-open-for-a-hidden-app\", \"name\": \"PM-published files open for a hidden app\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"uid 10213 (hidden) opened all 4 PM-published rule target(s): same size, first and last 4 KiB as the file each rule serves from\", \"meaning\": \"uid 10213 (hidden) opened all 4 PM-published rule target(s): same size, first and last 4 KiB as the file each rule serves from\", \"oracle\": null, \"owner\": null}, {\"id\": \"xattr-agrees-with-open-for-a-hidden-app\", \"name\": \"xattr agrees with open for a hidden app\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"labels and opens agree for uid 10213 (hidden) on every sampled path\", \"meaning\": \"labels and opens agree for uid 10213 (hidden) on every sampled path\", \"oracle\": null, \"owner\": null}, {\"id\": \"per-uid-consistency-canary\", \"name\": \"per-UID consistency canary\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"a hidden uid and a served uid saw what their rules say\", \"meaning\": \"a hidden uid and a served uid saw what their rules say\", \"oracle\": null, \"owner\": null}, {\"id\": \"readdir-ino-vs-stat-ino\", \"name\": \"readdir ino vs stat ino\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"every listed injected entry reports the same ino to readdir and stat\", \"meaning\": \"every listed injected entry reports the same ino to readdir and stat\", \"oracle\": null, \"owner\": null}, {\"id\": \"synthesized-inode-collision\", \"name\": \"synthesized inode collision\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no injected entry shares (dev, ino) with a stock one\", \"meaning\": \"no injected entry shares (dev, ino) with a stock one\", \"oracle\": null, \"owner\": null}, {\"id\": \"erofs-directory-shape\", \"name\": \"erofs directory shape\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"injected directories size and order like their erofs siblings\", \"meaning\": \"injected directories size and order like their erofs siblings\", \"oracle\": null, \"owner\": null}, {\"id\": \"overlay-dir-inode-range\", \"name\": \"overlay dir inode range\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"/product/overlay entries sit inside the range its stock siblings use\", \"meaning\": \"/product/overlay entries sit inside the range its stock siblings use\", \"oracle\": null, \"owner\": null}, {\"id\": \"injected-files-in-maps\", \"name\": \"injected files in maps\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"a mapped injected file reports the ROM's dev:ino in maps\", \"meaning\": \"a mapped injected file reports the ROM's dev:ino in maps\", \"oracle\": null, \"owner\": null}, {\"id\": \"kernel-surfaces\", \"name\": \"kernel surfaces\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"the engine's kernel surfaces answer as stock\", \"meaning\": \"the engine's kernel surfaces answer as stock\", \"oracle\": null, \"owner\": null}, {\"id\": \"zero-mount-posture\", \"name\": \"zero-mount posture\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no module mounts in this namespace\", \"meaning\": \"no module mounts in this namespace\", \"oracle\": null, \"owner\": null}, {\"id\": \"tmpfs-over-the-rom\", \"name\": \"tmpfs over the ROM\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no tmpfs mounted over a ROM path\", \"meaning\": \"no tmpfs mounted over a ROM path\", \"oracle\": null, \"owner\": null}, {\"id\": \"foreign-mount-over-the-rom\", \"name\": \"foreign mount over the ROM\", \"section\": \"device\", \"verdict\": \"pass\", \"severity\": \"ok\", \"evidence\": \"no other module mounts over a ROM path\", \"meaning\": \"no other module mounts over a ROM path\", \"oracle\": null, \"owner\": null}, {\"id\": \"ghost-cloak-verified-on-this-kernel\", \"name\": \"ghost cloak verified on this kernel\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"3 of 3 sampled hidden path(s) look exactly like paths that never existed, to hidden uid 10213. Measured, not assumed.\", \"meaning\": \"3 of 3 sampled hidden path(s) look exactly like paths that never existed, to hidden uid 10213. Measured, not assumed.\", \"oracle\": null, \"owner\": null}, {\"id\": \"isolated-process-pools-hiding\", \"name\": \"isolated-process pools\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"both - every isolated process of a hidden app is hidden too (default)\", \"meaning\": \"both - every isolated process of a hidden app is hidden too (default)\", \"oracle\": null, \"owner\": null}, {\"id\": \"directory-holds-only-injected-files\", \"name\": \"directory holds only injected files\", \"section\": \"plan\", \"verdict\": \"note\", \"severity\": \"info\", \"evidence\": \"/system/fonts holds stock files beside the 3 injected ones\", \"meaning\": \"/system/fonts holds stock files beside the 3 injected ones\", \"oracle\": null, \"owner\": null}]}",
+  "rc": 0,
+  "err": ""
+ },
+ "modules": {
+  "out": "example-features|on|0\nexample-fonts|on|0\nexample-overlays|on|0\nexample-sounds|on|0\nexample-unused|off|0\nmeta-nomount|suite|0\ndone=1",
+  "rc": 0,
+  "err": ""
+ },
+ "dev": {
+  "out": "Example Phone|Example|EX-1|16|36|6.12.69-android16-6-example-4k",
+  "rc": 0,
+  "err": ""
+ },
+ "stealth": {
+  "out": "sucompat=1\nksud=1\nroot_nm=0\nfp=Example/example/example:16/EX1A.261101.001/1:user/release-keys\nse=Enforcing\nbootid=4f1c2a90-7b3e-4d55-9a61-0c8e2f6b1d37\ndone=1",
+  "rc": 0,
+  "err": ""
+ },
+ "appnm": {
+  "out": "0",
+  "rc": 0,
+  "err": ""
+ },
+ "disabled": {
+  "out": "0",
+  "rc": 0,
+  "err": ""
+ },
+ "incident": {
+  "out": "",
+  "rc": 1,
+  "err": ""
+ },
+ "snapshot": {
+  "out": "1",
+  "rc": 0,
+  "err": ""
+ },
+ "uidlist": {
+  "out": "com.example.detector\tuid 10213 · live\ncom.example.bank\tuid 10388 · live\ncom.example.wallet\tuid 10402 · live",
+  "rc": 0,
+  "err": ""
+ },
+ "pkgs": {
+  "out": "package:com.example.bank uid:10388\npackage:com.example.browser uid:10190\npackage:com.example.camera uid:10201\npackage:com.example.detector uid:10213\npackage:com.example.maps uid:10255\npackage:com.example.music uid:10276\npackage:com.example.notes uid:10301\npackage:com.example.wallet uid:10402",
+  "rc": 0,
+  "err": ""
+ },
+ "absorbedlist": {
+  "out": "",
+  "rc": 0,
+  "err": ""
+ },
+ "whiteoutlist": {
+  "out": "/system/app/ExampleBloat\thidden\n/product/app/ExampleStore\thidden",
+  "rc": 0,
+  "err": ""
+ },
+ "uidksu": {
+  "out": "follow KernelSU DenyList\toff\nKernelSU driver\tversion 12345 · uapi 1\nglobal \"umount modules by default\"\toff\nDenyList covers\t2 of 8 installed package(s)",
+  "rc": 0,
+  "err": ""
+ },
+ "variant": {
+  "out": "lite",
+  "rc": 0,
+  "err": ""
+ },
+ "watchpid": {
+  "out": "",
+  "rc": 0,
+  "err": ""
+ },
+ "isolated": {
+  "out": "both - every isolated process (default)",
+  "rc": 0,
+  "err": ""
+ },
+ "bootcount": {
+  "out": "0",
+  "rc": 0,
+  "err": ""
+ },
+ "modprop": {
+  "out": "",
+  "rc": 1,
+  "err": ""
+ }
+}
