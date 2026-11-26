@@ -111,12 +111,12 @@
 
 int nm_pathhide_ctl_fwd(const char *buf, size_t count)
 {
-	return -EOPNOTSUPP;
+	return -ENOSYS;
 }
 
 int nm_pathhide_get_rule_fwd(int idx, char *out, size_t outsz)
 {
-	return -EOPNOTSUPP;
+	return -ENOSYS;
 }
 
 /* -EOPNOTSUPP, not 0. NM_GUARD reads 0 as "armed": it printed
@@ -190,6 +190,12 @@ struct nm_ph_ctx {
 	bool hide;
 };
 
+/* mincore's own: the range is saved at entry and only walked once the call succeeded. */
+struct nm_ph_mincore_ctx {
+	unsigned long start;
+	unsigned long len;
+};
+
 static bool nm_ph_vma_hidden(struct vm_area_struct *vma)
 {
 	return vma && vma->vm_file && pathhide_match_file(vma->vm_file);
@@ -202,6 +208,8 @@ static bool nm_ph_range_hidden(unsigned long start, unsigned long len)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long addr, end;
+	struct file *last = NULL;
+	bool last_hidden = false;
 	bool hit = false;
 
 	if (!mm)
@@ -219,7 +227,13 @@ static bool nm_ph_range_hidden(unsigned long start, unsigned long len)
 
 		if (!vma || vma->vm_start >= end)
 			break;
-		if (nm_ph_vma_hidden(vma)) {
+		/* One d_path per file, not per mapping: thousands of maps of one file
+		 * are cheap to make and each would cost a full path render. */
+		if (vma->vm_file && vma->vm_file != last) {
+			last = vma->vm_file;
+			last_hidden = pathhide_match_file(last);
+		}
+		if (vma->vm_file && last_hidden) {
 			hit = true;
 			break;
 		}
@@ -232,16 +246,17 @@ static bool nm_ph_range_hidden(unsigned long start, unsigned long len)
 	return hit;
 }
 
+/* No walk here. The entry handler runs before the syscall validates anything, with
+ * IRQs masked, so walking every vma of a caller-chosen range made an unaligned
+ * mincore() -- stock answers -EINVAL at once -- cost milliseconds: a timing oracle
+ * and an IRQs-off latency source for any app. */
 static int nm_ph_mincore_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_ph_ctx *ctx = (struct nm_ph_ctx *)ri->data;
+	struct nm_ph_mincore_ctx *ctx = (struct nm_ph_mincore_ctx *)ri->data;
 	struct pt_regs *args = (struct pt_regs *)regs->regs[0];
 
-	ctx->hide = false;
-	if (!args)
-		return 0;
-
-	ctx->hide = nm_ph_range_hidden(args->regs[0], args->regs[1]);
+	ctx->start = args ? args->regs[0] : 0;
+	ctx->len = args ? args->regs[1] : 0;
 	return 0;
 }
 
@@ -260,9 +275,12 @@ static int nm_ph_mincore_entry(struct kretprobe_instance *ri, struct pt_regs *re
  */
 static int nm_ph_mincore_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_ph_ctx *ctx = (struct nm_ph_ctx *)ri->data;
+	struct nm_ph_mincore_ctx *ctx = (struct nm_ph_mincore_ctx *)ri->data;
 
-	if (ctx->hide && (long)regs->regs[0] == 0)
+	/* A success means the whole range was mapped and the body already did work over
+	 * every page of it, so the walk never costs more than the call it rides on. */
+	if ((long)regs->regs[0] == 0 && ctx->len &&
+	    nm_ph_range_hidden(ctx->start, ctx->len))
 		regs->regs[0] = (unsigned long)(long)-ENOMEM;
 	return 0;
 }
@@ -444,7 +462,7 @@ static struct kretprobe nm_ph_krp[] = {
 		.kp.symbol_name = "__arm64_sys_mincore",
 		.entry_handler  = nm_ph_mincore_entry,
 		.handler        = nm_ph_mincore_ret,
-		.data_size      = sizeof(struct nm_ph_ctx),
+		.data_size      = sizeof(struct nm_ph_mincore_ctx),
 		.maxactive      = 64,
 	},
 	{
@@ -495,6 +513,17 @@ static void nm_ph_arm_pagemap(void)
 
 /* Every surface this build could close, including the one it cannot: the
  * accounting arm has no mechanism here, so it is counted and never armed. */
+/* Surfaces a KMI may legitimately not have. Their absence gets nm_say(), silent on a hiding
+ * build, not a line naming the module on every boot. */
+static bool nm_ph_optional(const char *sym)
+{
+	if (!strcmp(sym, "show_numa_map"))
+		return !IS_ENABLED(CONFIG_NUMA);
+	if (!strcmp(sym, "pagemap_scan_test_walk"))
+		return LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0);
+	return false;
+}
+
 #define NM_PH_SURFACES \
 	(ARRAY_SIZE(nm_ph_krp) + ARRAY_SIZE(nm_ph_kp_show) + 3)
 
@@ -519,9 +548,13 @@ int nm_pathhide_probes_init(void)
 
 		if (rc) {
 			nm_ph_show_armed[i] = false;
-			pr_warn("nomount: pathhide guard: cannot probe %s (%d). %s.\n",
-				nm_ph_kp_show[i].symbol_name, rc,
-				nm_ph_show_surface[i]);
+			if (nm_ph_optional(nm_ph_kp_show[i].symbol_name))
+				nm_say("nomount: pathhide guard: %s absent on this kernel (%d)\n",
+				       nm_ph_kp_show[i].symbol_name, rc);
+			else
+				pr_warn("nomount: pathhide guard: cannot probe %s (%d). %s.\n",
+					nm_ph_kp_show[i].symbol_name, rc,
+					nm_ph_show_surface[i]);
 			continue;
 		}
 		nm_ph_show_armed[i] = true;
@@ -533,8 +566,12 @@ int nm_pathhide_probes_init(void)
 
 		if (rc) {
 			nm_ph_armed[i] = false;
-			pr_warn("nomount: pathhide guard: cannot probe %s (%d). %s.\n",
-				nm_ph_krp[i].kp.symbol_name, rc, nm_ph_surface[i]);
+			if (nm_ph_optional(nm_ph_krp[i].kp.symbol_name))
+				nm_say("nomount: pathhide guard: %s absent on this kernel (%d)\n",
+				       nm_ph_krp[i].kp.symbol_name, rc);
+			else
+				pr_warn("nomount: pathhide guard: cannot probe %s (%d). %s.\n",
+					nm_ph_krp[i].kp.symbol_name, rc, nm_ph_surface[i]);
 			continue;
 		}
 		nm_ph_armed[i] = true;

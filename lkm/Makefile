@@ -46,10 +46,10 @@ ccflags-y += -I$(src) -I$(src)/../hookless/src
 # Off by default: these fire per rule, and a mount pass installs hundreds.
 #
 # What it is for right now: the `inoseed:` and `inoplace:` lines in nm_place_dir_ino()
-# and nm_dev_ino_get(). A synthesized directory is placed one above the highest number
-# in play, and on an OP15 that came out nineteen times above the victim partition's own
-# ceiling -- those lines name which of the four inputs produced it, and which path was
-# scanned to seed it. One boot is enough:
+# and nm_dev_ino_get(). A synthesized directory takes a free number inside its stock
+# siblings' range (local gap, then the overlay counter, then the scanned directory band)
+# and goes above everything only when none of those applies -- those lines name which
+# branch won and which path was scanned to seed it. One boot is enough:
 #
 #   dmesg | grep -E 'NoMount.*ino(seed|place)'
 #

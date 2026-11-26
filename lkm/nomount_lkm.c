@@ -142,6 +142,9 @@ static int nm_guard_na;
 	static const int nm_lkm_wrapper_built = 1;			\
 	module_init(nm_lkm_init)
 
+/* The kernel's own module_exit is restored below for nm_lkm_exit: it carries the CFI
+ * jump-table entry for cleanup_module that a hand-written alias drops (rmmod panics). */
+#pragma push_macro("module_exit")
 #undef module_exit
 #define module_exit(fn)							\
 	static void __exit nm_lkm_exit(void)				\
@@ -154,10 +157,12 @@ static int nm_guard_na;
 		nm_defer_exit();					\
 		fn();							\
 	}								\
-	void cleanup_module(void) __attribute__((alias("nm_lkm_exit")));	\
 	static const int nm_lkm_teardown_built = 1
 
 #include "../hookless/src/nomount.c"
+
+#pragma pop_macro("module_exit")
+module_exit(nm_lkm_exit);
 
 /* The gate for the include order at the top of this file. nm_lkm_wrapper_built is
  * declared inside the fs_initcall redefinition, so it exists only if the engine's
@@ -175,6 +180,7 @@ MODULE_INFO(nomount_variant, "lkm");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("ANDROID_GKI_VFS_EXPORT_ONLY");
 MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+MODULE_IMPORT_NS("ANDROID_GKI_VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #else
 MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);

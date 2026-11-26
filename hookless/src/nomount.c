@@ -90,6 +90,13 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node);
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
 static void nm_free_rule(struct nomount_rule *rule);
+static void nm_forget_dev_caches(dev_t dev);
+static void nm_fa_sample_path(const struct path *p, struct nm_fa_sample *s);
+static int nm_hijacked_erofs_listing(struct file *file, struct dir_context *ctx,
+                                     struct nomount_dir_node *pdir,
+                                     const struct file_operations *orig_fop);
+static bool nm_hijacked_erofs_size(struct nomount_dir_node *d, unsigned int bs, loff_t *out);
+static void nm_rlist_free(struct nm_rlist *rl);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
@@ -153,29 +160,23 @@ bool nm_uid_blocked(uid_t uid)
     return nomount_is_uid_blocked(uid);
 }
 
-static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
+/* Whether a scope admits the calling uid. Shared by the rule (at lookup) and the copy an
+ * inode carries (at every later op), so the two can never disagree. */
+static __always_inline bool nm_scope_admits(unsigned int target_uid, unsigned int uid_end,
+                                            u8 deny_n, const unsigned int *deny)
 {
-    unsigned int uid;
+    unsigned int uid = current_uid().val;
 
-    if (!rule) return false;
-    /* A minted intermediate is reachable from its parent's children_idr before
-     * the fill pass stamps ino/times/secctx/blksize. Serving it there handed an
-     * unprivileged reader v_ino = the raw name hash and v_blksize = 0 (measured
-     * on an OP15: st_ino 1779265970 beside stock 10..37, st_blksize 1, repaired
-     * ~116us later). Absent until stamped; the acquire orders the metadata. */
-    if (unlikely(smp_load_acquire(&rule->pending))) return false;
-    uid = current_uid().val;
-
-    if (rule->uid_end) {
+    if (uid_end) {
         /* Range mode: RAW uids, and deliberately not per-user. "every uid except
          * system_server" works because system_server is 1000 on every user; a
          * range like 10200-10200 matches user 0 only, which is the point.
          */
-        if (uid < rule->target_uid || uid > rule->uid_end)
+        if (uid < target_uid || uid > uid_end)
             return false;
-    } else if (rule->target_uid) {
+    } else if (target_uid) {
         /* Legacy mode, unchanged: target_uid is an appid, matched across users. */
-        if ((rule->target_uid % NM_PER_USER_RANGE) != (uid % NM_PER_USER_RANGE))
+        if ((target_uid % NM_PER_USER_RANGE) != (uid % NM_PER_USER_RANGE))
             return false;
     }
 
@@ -183,16 +184,54 @@ static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
      * work profile included. It applies to both modes: the scope above selects
      * raw uids, this subtracts apps from whatever it selected.
      */
-    if (rule->deny_n) {
-        unsigned int appid = uid % NM_PER_USER_RANGE;
+    if (deny_n) {
+        /* nm_appid_of, as the hide list does: an excluded app's SDK-sandbox uid is the app. */
+        unsigned int appid = nm_appid_of(uid);
         u8 i;
 
-        for (i = 0; i < rule->deny_n; i++)
-            if (rule->deny_appid[i] == appid)
+        for (i = 0; i < deny_n && i < NM_DENY_MAX; i++)
+            if (deny[i] == appid)
                 return false;
     }
 
     return true;
+}
+
+static __always_inline bool nm_rule_live(const struct nomount_rule *rule)
+{
+    /* A minted intermediate is reachable from its parent's children_idr before
+     * the fill pass stamps ino/times/secctx/blksize. Serving it there handed an
+     * unprivileged reader v_ino = the raw name hash and v_blksize = 0 (measured
+     * on an OP15: st_ino 1779265970 beside stock 10..37, st_blksize 1, repaired
+     * ~116us later). Absent until stamped; the acquire orders the metadata. */
+    return rule && !smp_load_acquire(&rule->pending);
+}
+
+/* Read end, start, deny in that order, against nm_widen_scope_up() writing deny, start,
+ * end: any mix a reader can see is then the old scope or wider, never narrower. */
+static __always_inline void nm_scope_snapshot(const struct nomount_rule *rule,
+                                              unsigned int *start, unsigned int *end, u8 *dn)
+{
+    *end = READ_ONCE(rule->uid_end);
+    smp_rmb();
+    *start = READ_ONCE(rule->target_uid);
+    smp_rmb();
+    *dn = READ_ONCE(rule->deny_n);
+}
+
+static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
+{
+    unsigned int start, end;
+    u8 dn;
+
+    if (!nm_rule_live(rule)) return false;
+    nm_scope_snapshot(rule, &start, &end, &dn);
+    return nm_scope_admits(start, end, dn, rule->deny_appid);
+}
+
+static __always_inline bool nm_scope_copy_admits(const struct nm_scope_copy *s)
+{
+    return nm_scope_admits(s->uid, s->uid_end, s->deny_n, s->deny);
 }
 
 /* Two rules on one vpath are the SAME rule only if they are served to the same
@@ -268,6 +307,18 @@ static __always_inline bool nm_uid_hidden(u32 flags)
            nomount_is_uid_blocked(current_uid().val);
 }
 
+/* Whether this caller is served the rule behind an inode: in its scope and not hidden from
+ * by the hide list. Everyone else gets the stock file, or ENOENT where there is none. */
+static __always_inline bool nm_info_served(const struct nm_inode_info *info)
+{
+    return nm_scope_copy_admits(&info->v_scope) && !nm_uid_hidden(info->flags);
+}
+
+static __always_inline bool nm_rinfo_served(const struct nm_rule_info *ri)
+{
+    return nm_scope_copy_admits(&ri->v_scope) && !nm_uid_hidden(ri->flags);
+}
+
 static __always_inline bool nm_child_visible(const struct nomount_child_node *child)
 {
     return child && nm_rule_visible(READ_ONCE(child->rule)) && !nm_uid_hidden(child->flags);
@@ -317,26 +368,6 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
     return NULL;
 }
 
-static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node *dir_node,
-                                                        const char *name, size_t len, u32 hash)
-{
-    struct nomount_child_node *child;
-    bool found = false;
-
-    if (unlikely(!dir_node)) return false;
-    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
-
-    rcu_read_lock();
-    hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
-        if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
-            found = READ_ONCE(child->rule) && !nm_child_visible(child);
-            break;
-        }
-    }
-    rcu_read_unlock();
-    return found;
-}
-
 /* Whether a rule covers this name at all, visible to the caller or not. */
 static __always_inline bool nm_name_has_rule(struct nomount_dir_node *dir_node,
                                              const char *name, size_t len, u32 hash)
@@ -358,7 +389,9 @@ static __always_inline bool nm_name_has_rule(struct nomount_dir_node *dir_node,
     return found;
 }
 
-static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info, bool get_path)
+/* any_scope: match the rule whoever is asking, and let the caller decide per uid from the
+ * scope copied into rule_info. One rule per vpath (a second scope is refused at add). */
+static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info, bool get_path, bool any_scope)
 {
     struct nomount_child_node *child;
     bool found = false;
@@ -369,6 +402,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     rule_info->r_path.mnt = NULL;
     rule_info->s_path.dentry = NULL;
     rule_info->s_path.mnt = NULL;
+    memset(&rule_info->v_scope, 0, sizeof(rule_info->v_scope));
     if (unlikely(!dir_node)) return false;
     if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
 
@@ -376,9 +410,12 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
             struct nomount_rule *rule = smp_load_acquire(&child->rule);
-            if (nm_rule_visible(rule)) {
+            if (any_scope ? nm_rule_live(rule) : nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
-                if (rule->target_uid || rule->uid_end || rule->deny_n)
+                nm_scope_snapshot(rule, &rule_info->v_scope.uid, &rule_info->v_scope.uid_end,
+                                  &rule_info->v_scope.deny_n);
+                memcpy(rule_info->v_scope.deny, rule->deny_appid, sizeof(rule_info->v_scope.deny));
+                if (rule_info->v_scope.uid || rule_info->v_scope.uid_end || rule_info->v_scope.deny_n)
                     rule_info->flags |= NM_FLAG_UID_SCOPED;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dino = rule->v_dino;
@@ -397,12 +434,14 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_dio_mem = rule->v_dio_mem;
                 rule_info->v_dio_off = rule->v_dio_off;
                 rule_info->v_cap = rule->v_cap;
+                rule_info->v_fa = rule->v_fa;
+                rule_info->v_cfile = rule->v_cfile;
                 rule_info->v_uid = rule->v_uid;
                 rule_info->v_gid = rule->v_gid;
                 rule_info->v_mode = rule->v_mode;
                 rule_info->v_ctx_len = rule->v_ctx_len;
                 if (rule->v_ctx_len) memcpy(rule_info->v_ctx, rule->v_ctx, rule->v_ctx_len + 1);
-                rule_info->this_dir = rule->this_dir;
+                rule_info->this_dir = smp_load_acquire(&rule->this_dir);
                 if (rule_info->this_dir && !atomic_inc_not_zero(&rule_info->this_dir->refcount))
                     rule_info->this_dir = NULL;
                 if (get_path && rule->r_path.dentry) {
@@ -436,7 +475,16 @@ struct nomount_proxy_ctx {
     const struct nm_inode_info *dir_info;
     int emitted;
     bool refused;
+    bool stock_space;   /* listing the stock dir for a caller served s_path */
 };
+
+static inline void nm_proxy_note(struct nomount_proxy_ctx *p, loff_t off)
+{
+    if (p->stock_space)
+        nm_note_stock_pos(p->dir_node, off);
+    else
+        nm_note_real_pos(p->dir_node, off);
+}
 
 static inline unsigned long nm_child_ino(unsigned long base, const char *name, int len, bool dirent)
 {
@@ -485,7 +533,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
                     unsigned char dt = child->d_type;
 
                     rcu_read_unlock();
-                    nm_note_real_pos(proxy->dir_node, offset);
+                    nm_proxy_note(proxy, offset);
                     proxy->orig_ctx->pos = proxy->ctx.pos;
                     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen,
                                                  offset, fino, dt);
@@ -506,7 +554,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
 do_real_actor:
     if (proxy->dir_info)
         ino = nm_dirent_ino(proxy->dir_info, name, namelen);
-    nm_note_real_pos(proxy->dir_node, offset);
+    nm_proxy_note(proxy, offset);
     proxy->orig_ctx->pos = proxy->ctx.pos;
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
     proxy->ctx.pos = proxy->orig_ctx->pos;
@@ -535,18 +583,29 @@ static bool nm_emit_dots(struct file *file, struct dir_context *ctx,
     return true;
 }
 
-static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node,
-                                                 bool real_pass_done)
+/* True when it found a child to offer, emitted or not. A pass that found none must leave
+ * the caller's position where the real filesystem left it: every stock fs keeps f_pos
+ * unchanged on a getdents that returns nothing. */
+/* The injected tail of a listing, after the real entries, at base + 1 + k where k counts
+ * only the children THIS caller may see. Child ids are shared by every caller, so packing
+ * by id left a gap wherever a sibling hidden from the reader sat (eo-7 c).
+ *
+ * True when it found a child to offer, emitted or not. A pass that found none leaves the
+ * caller's position where the real filesystem left it: every stock fs keeps f_pos unchanged
+ * on a getdents that returns nothing. */
+static bool nm_emit_tail(struct dir_context *ctx, struct nomount_dir_node *dir_node,
+                         loff_t base, bool real_pass_done)
 {
     struct nomount_child_node *child;
-    int id;
+    loff_t skip = 0, k = 0;
+    bool any = false;
+    int id = 0;
 
-    if (!dir_node) return;
-    if (!nm_is_virtual_pos(dir_node, ctx->pos)) ctx->pos = nm_pack_pos(dir_node, 0);
-    id = nm_unpack_pos(dir_node, ctx->pos);
-    if (id < 0) id = 0;
+    if (!dir_node || !base) return false;
+    if (ctx->pos > base && ctx->pos <= base + NM_POS_HEADROOM)
+        skip = ctx->pos - base - 1;
 
-    if (!atomic_inc_not_zero(&dir_node->refcount)) return;
+    if (!atomic_inc_not_zero(&dir_node->refcount)) return false;
 
     for (;;) {
         char name[NAME_MAX + 1];
@@ -572,14 +631,64 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
 
         if (found < 0)
             break;
-        ctx->pos = nm_pack_pos(dir_node, found);
+        id = found + 1;
+        if (k < skip) {
+            k++;
+            continue;
+        }
+        any = true;
+        ctx->pos = base + 1 + k;
         if (!dir_emit(ctx, name, nlen, fino, dt))
             break;
-        id = found + 1;
-        ctx->pos = nm_pack_pos(dir_node, id);
+        k++;
+        ctx->pos = base + 1 + k;
     }
 
     nm_dir_node_put(dir_node);
+    return any;
+}
+
+static inline bool nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node,
+                                                 bool real_pass_done)
+{
+    return dir_node && nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->real_eof), real_pass_done);
+}
+
+static void nm_mirror_blocks(const struct nm_inode_info *info, struct inode *v_inode,
+                             const struct path *backing, struct kstat *stat);
+
+static inline bool nm_victim_is_overlay(const struct super_block *sb)
+{
+#ifdef OVERLAYFS_SUPER_MAGIC
+    return sb && sb->s_magic == OVERLAYFS_SUPER_MAGIC;
+#else
+    return false;
+#endif
+}
+
+/* Whether a caller the rule does not serve may share the injected inode, with its ops
+ * handing it the stock file: a regular file standing in for a stock regular file, off
+ * overlayfs. A directory builds its children per caller, a type change answers with the
+ * wrong ops, and an overlay victim maps through the overlay's own mapping -- those keep a
+ * per-caller dentry, as before. */
+static __always_inline bool nm_shareable_stock(umode_t vmode, const struct path *s_path,
+                                               const struct super_block *vsb, u32 flags)
+{
+    struct inode *si;
+
+    if (!(flags & NM_FLAG_SHADOWS_STOCK) ||
+        (flags & (NM_FLAG_WHITEOUT | NM_FLAG_VIRTUAL_DIR | NM_FLAG_STOCK_ONLY)) ||
+        !s_path->dentry || nm_victim_is_overlay(vsb))
+        return false;
+    si = d_backing_inode(s_path->dentry);
+    return si && S_ISREG(si->i_mode) && S_ISREG(vmode);
+}
+
+/* What an absent name answers: a create-type lookup on a read-only victim says EROFS, as
+ * it does for a name that is not there at all. */
+static __always_inline int nm_absent_errno(const struct inode *ino, unsigned int flags)
+{
+    return ((flags & LOOKUP_CREATE) && ino && IS_RDONLY(ino)) ? -EROFS : -ENOENT;
 }
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info)
@@ -635,6 +744,9 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_dio_mem = rule_info->v_dio_mem;
     info->v_dio_off = rule_info->v_dio_off;
     info->v_cap = rule_info->v_cap;
+    info->v_fa = rule_info->v_fa;
+    info->v_cfile = rule_info->v_cfile;
+    info->v_scope = rule_info->v_scope;
     if ((rule_info->flags & NM_FLAG_HAVE_VOWN) && !(rule_info->flags & NM_FLAG_VIRTUAL_DIR)) {
         info->v_mode = rule_info->v_mode;
         info->v_uid = rule_info->v_uid;
@@ -646,7 +758,8 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         inode->i_mode = S_IFDIR | (rule_info->v_mode ? rule_info->v_mode : 0755);
         inode->i_size = 4096;
-        inode->i_blocks = 8;
+        /* What FIOQSIZE reads. overlayfs never sets i_blocks, so stock answers 0 there. */
+        inode->i_blocks = nm_victim_is_overlay(virtual_sb) ? 0 : 8;
         inode->i_uid = rule_info->v_uid;
         inode->i_gid = rule_info->v_gid;
         {
@@ -671,8 +784,22 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     } else {
         struct inode *real_inode = d_backing_inode(rule_info->r_path.dentry);
         inode->i_mode = real_inode->i_mode;
+        /* Always the module's size. FIONREAD reads it straight off this inode, so a caller
+         * served the stock file through it sees the module's (eo-6), but kernel_read_file()
+         * sizes .ko and firmware loads from it too, and those readers ARE served the module:
+         * one inode holds one size. eo-6 needs the ioctl itself to ask the served file. */
         inode->i_size = i_size_read(real_inode);
         inode->i_blocks = real_inode->i_blocks;
+        /* FIOQSIZE reads i_blocks, so it has to agree with what getattr reports. */
+        if (nm_victim_is_overlay(virtual_sb)) {
+            inode->i_blocks = 0;
+        } else {
+            struct kstat kst = { .mode = real_inode->i_mode, .size = inode->i_size,
+                                 .blocks = real_inode->i_blocks };
+
+            nm_mirror_blocks(info, inode, &rule_info->r_path, &kst);
+            inode->i_blocks = kst.blocks;
+        }
         inode->i_uid = real_inode->i_uid;
         inode->i_gid = real_inode->i_gid;
         if (rule_info->flags & NM_FLAG_HAVE_VOWN) {
@@ -737,13 +864,19 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
 
-    if (unlikely(!pdir || (nomount_is_uid_blocked(current_uid().val) &&
-                           !READ_ONCE(pdir->has_public))))
+    if (unlikely(!pdir))
         goto fallback;
 
     v_hash = full_name_hash(NULL, name, len);
-    if (nomount_get_rule_info(pdir, name, len, v_hash, &rule_info, true)) {
-        if (unlikely(nm_uid_hidden(rule_info.flags))) {
+    if (nomount_get_rule_info(pdir, name, len, v_hash, &rule_info, true, true)) {
+        /* A caller the rule does not serve still gets the SHARED injected dentry when a
+         * regular file replaces a stock regular file (nm_shareable_stock): the inode's ops
+         * hand it the stock one. A real dentry of its own would be invalidated by the next
+         * caller the rule does serve, and every mapping of it would read "(deleted)". */
+        if (!nm_rinfo_served(&rule_info) &&
+            !(rule_info.r_path.dentry && d_backing_inode(rule_info.r_path.dentry) &&
+              nm_shareable_stock(d_backing_inode(rule_info.r_path.dentry)->i_mode,
+                                 &rule_info.s_path, dir->i_sb, rule_info.flags))) {
             nm_put_rule_info(&rule_info);
             goto fallback;
         }
@@ -809,6 +942,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
         .ctx.actor = nomount_actor_proxy,
         .refused = false,
     };
+    loff_t start;
     int res = 0;
 
     rcu_read_lock();
@@ -823,11 +957,24 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
                   !READ_ONCE(pdir->has_public))))
         goto do_real_iterate;
 
+    /* erofs: one byte-sorted, erofs-packed listing of the real and the injected entries,
+     * whose terminal is the size getattr reports. Appending the injected names after the
+     * stock tail broke erofs's order, its d_off stride and its terminal (eo-7 a). */
+    if (file_inode(file)->i_sb->s_magic == EROFS_SUPER_MAGIC_V1) {
+        int r = nm_hijacked_erofs_listing(file, ctx, pdir, orig_fop);
+
+        if (r <= 0) {
+            res = r;
+            goto out;
+        }
+    }
+
     if (unlikely(nm_is_virtual_pos(pdir, ctx->pos))) {
         nomount_emit_virtual_children(ctx, pdir, true);
         goto out;
     }
 
+    start = ctx->pos;
     proxy_ctx.ctx.pos = ctx->pos;
     proxy_ctx.orig_ctx = ctx;
     proxy_ctx.dir_node = pdir;
@@ -835,11 +982,23 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
 
     res = nm_call_iterate(file, &proxy_ctx.ctx, orig_fop);
     ctx->pos = proxy_ctx.ctx.pos;
+    /* A pass that listed entries and ran to the end records where the fs ended. One that
+     * listed nothing proves nothing: an lseek past the end lands there too. */
+    if (res >= 0 && !proxy_ctx.refused && proxy_ctx.emitted > 0)
+        WRITE_ONCE(pdir->real_end, ctx->pos);
     if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) goto out;
 
-    nm_publish_real_eof(pdir, ctx->pos);
-    ctx->pos = nm_pack_pos(pdir, 0);
-    nomount_emit_virtual_children(ctx, pdir, true);
+    {
+        loff_t base = READ_ONCE(pdir->real_eof);
+
+        /* A pass that began past the published end -- an lseek beyond it -- gets what stock
+         * gives there, nothing, and must not move the base every other reader decodes
+         * against (em-3). Resuming at the fs's own recorded end is not that. */
+        if (base && start > base && start != READ_ONCE(pdir->real_end))
+            goto out;
+        nm_publish_real_eof(pdir, ctx->pos);
+        nomount_emit_virtual_children(ctx, pdir, true);
+    }
     goto out;
 
 do_real_iterate:
@@ -994,15 +1153,14 @@ static void nomount_hijacked_evict_inode(struct inode *inode)
 
 static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *info)
 {
-    return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) &&
-           nm_uid_hidden(info->flags);
+    return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) && !nm_info_served(info);
 }
 
 static __always_inline struct path *nm_stock_for_caller(struct nm_inode_info *info)
 {
     if (!info || !info->s_path.dentry) return NULL;
     if (!(info->flags & NM_FLAG_SHADOWS_STOCK)) return NULL;
-    return nm_uid_hidden(info->flags) ? &info->s_path : NULL;
+    return nm_info_served(info) ? NULL : &info->s_path;
 }
 
 static int nm_open(struct inode *inode, struct file *file)
@@ -1024,13 +1182,20 @@ static int nm_open(struct inode *inode, struct file *file)
     }
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
         file->private_data = NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+        if (info->v_cap & NM_CAP_ODIRECT)
+            file->f_mode |= FMODE_CAN_ODIRECT;
+#endif
         return 0;
     }
     if (unlikely(!info->r_path.dentry)) return -ENODEV;
 
-    real_file = dentry_open(&info->r_path, file->f_flags, current_cred());
+    /* An f2fs directory refuses O_DIRECT; whether this one takes it is the victim's answer. */
+    real_file = dentry_open(&info->r_path,
+                            S_ISDIR(inode->i_mode) ? file->f_flags & ~O_DIRECT : file->f_flags,
+                            current_cred());
     if (IS_ERR(real_file)) {
-        nm_warn_once("open of backing file denied (relabel the module tree)\n");
+        nm_debug("open of backing file denied (relabel the module tree)\n");
         return PTR_ERR(real_file);
     }
 
@@ -1208,6 +1373,42 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
 }
 #endif
 
+/* The cmds every filesystem with an ioctl answers alike; anything else is the backing fs's own.
+ * Overlay's ioctl (before 5.13) knows the flags but not FS_IOC_GETVERSION. */
+static bool nm_ioctl_generic(unsigned int cmd, const struct super_block *vsb)
+{
+    switch (cmd) {
+    case FS_IOC_GETVERSION:
+#if defined(FS_IOC32_GETVERSION) && BITS_PER_LONG == 64
+    case FS_IOC32_GETVERSION:
+#endif
+#ifdef OVERLAYFS_SUPER_MAGIC
+        if (vsb->s_magic == OVERLAYFS_SUPER_MAGIC)
+            return false;
+#endif
+        return true;
+    case FS_IOC_GETFLAGS:
+#ifdef FS_IOC_FSGETXATTR
+    case FS_IOC_FSGETXATTR:
+#endif
+#if defined(FS_IOC32_GETFLAGS) && BITS_PER_LONG == 64
+    case FS_IOC32_GETFLAGS:
+#endif
+        return true;
+    }
+    return false;
+}
+
+/* erofs, or an overlay over it: an unsampled path there gets erofs's answer. */
+static bool nm_victim_ro_image(const struct super_block *sb)
+{
+#ifdef OVERLAYFS_SUPER_MAGIC
+    if (sb->s_magic == OVERLAYFS_SUPER_MAGIC)
+        return true;
+#endif
+    return sb->s_magic == EROFS_SUPER_MAGIC_V1;
+}
+
 static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long arg, bool compat)
 {
     struct nm_inode_info *info = file_inode(file)->i_private;
@@ -1218,21 +1419,24 @@ static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long
     if (unlikely(!info))
         return -ENOTTY;
 
-    /* Answer as the stock file where there is one; otherwise answer from the file we
-     * actually serve.
-     *
-     * A purely injected path has no stock counterpart -- its vpath did not exist when
-     * the rule was added, so nm_alloc_rule never set s_path -- and this returned -ENOTTY
-     * outright for those. That made one ioctl() a clean separator: a genuine erofs, ext4
-     * or f2fs file answers FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FS_IOC_GETVERSION, and
-     * every injected file refused all three. "As stock" is undefined with no stock file,
-     * and the backing file is what the injected one IS.
-     */
+    /* Answer as the stock file where there is one; otherwise from the file we serve, but
+     * only as far as the VICTIM answers ioctls at all. The backing file is f2fs: asking it
+     * blindly made FS_IOC_GETVERSION succeed on injected /product files whose erofs and
+     * overlay siblings all answer -ENOTTY. */
     src = info->s_path.dentry ? &info->s_path
         : info->r_path.dentry ? &info->r_path
         : NULL;
     if (!src)
         return -ENOTTY;
+
+    if (!info->s_path.dentry) {
+        struct super_block *vsb = file_inode(file)->i_sb;
+
+        if ((info->v_cap & NM_CAP_KNOWN) ? !(info->v_cap & NM_CAP_IOCTL) : nm_victim_ro_image(vsb))
+            return -ENOTTY;
+        if (src->dentry->d_sb->s_magic != vsb->s_magic && !nm_ioctl_generic(cmd, vsb))
+            return -ENOTTY;
+    }
 
     {
         struct inode *si = d_backing_inode(src->dentry);
@@ -1307,26 +1511,46 @@ static u16 nm_size_ratio(loff_t size, blkcnt_t blocks)
     if (size < 8192 || alloc == 0)
         return 0;
     r = div64_u64(alloc << 10, (u64)size);
+    /* At or above 1:1 the sample was stored uncompressed; 0 says so. */
+    if (r >= 1024)
+        return 0;
     if (r < 128) r = 128;
     if (r > 896) r = 896;
     return (u16)r;
 }
 
-static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *stat)
+/* st_blocks in the victim's units. The backing file is f2fs, which counts an inline file
+ * in 512-byte sectors; an erofs or overlay file is always whole blocks, and exactly
+ * round_up(size) unless it is compressed. A same-type backing fs keeps its own count. */
+static void nm_mirror_blocks(const struct nm_inode_info *info, struct inode *v_inode,
+                             const struct path *backing, struct kstat *stat)
 {
+    u64 bs = info->v_blksize ? info->v_blksize : v_inode->i_sb->s_blocksize;
     u64 want, rup, cap;
+    bool compressed = info->v_cratio != 0;
 
-    if (!info->v_cratio || stat->size < 4096)
+    if (backing->dentry && backing->dentry->d_sb->s_magic == v_inode->i_sb->s_magic)
         return;
+    /* ext4 fast symlinks count 0 blocks; erofs and overlay ones are whole blocks too. */
+    if (!S_ISREG(stat->mode) && !(S_ISLNK(stat->mode) && nm_victim_ro_image(v_inode->i_sb)))
+        return;
+    if (!bs || (bs & (bs - 1)))
+        bs = 4096;
+#ifdef STATX_ATTR_COMPRESSED
+    if (info->v_attr_mask & STATX_ATTR_COMPRESSED)
+        compressed = compressed && (info->v_attributes & STATX_ATTR_COMPRESSED);
+#endif
+    rup = ((u64)stat->size + bs - 1) & ~(bs - 1);
+    if (!compressed || (u64)stat->size <= bs) {
+        stat->blocks = (blkcnt_t)(rup >> 9);
+        return;
+    }
     want = div64_u64((u64)stat->size * info->v_cratio, 1024);
-    want = (want + 4095) & ~4095ULL;
-    rup = ((u64)stat->size + 4095) & ~4095ULL;
-    cap = rup > 4096 ? rup - 4096 : 0;
+    want = (want + bs - 1) & ~(bs - 1);
+    cap = rup - bs;
     if (want > cap)
         want = cap;
-    if (!want)
-        return;
-    stat->blocks = (blkcnt_t)(want >> 9);
+    stat->blocks = (blkcnt_t)((want ? want : rup) >> 9);
 }
 
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
@@ -1351,6 +1575,12 @@ static u8 nm_stock_caps(struct inode *ino)
     if (!ino) return 0;
     if (ino->i_fop && ino->i_fop->fsync) cap |= NM_CAP_FSYNC;
     if (ino->i_fop && ino->i_fop->get_unmapped_area) cap |= NM_CAP_THPMAP;
+    if (ino->i_fop && (ino->i_fop->unlocked_ioctl
+#ifdef CONFIG_COMPAT
+                       || ino->i_fop->compat_ioctl
+#endif
+                      ))
+        cap |= NM_CAP_IOCTL;
     return cap;
 }
 
@@ -1437,34 +1667,6 @@ static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
 
 #define NM_EROFS_DIRENT_SZ 12
 
-static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize)
-{
-    struct nomount_child_node *ch;
-    loff_t full = 0;
-    unsigned int used;
-    int cid = 0;
-
-    used = 2 * NM_EROFS_DIRENT_SZ + 1 + 2;
-
-    if (d) {
-        rcu_read_lock();
-        idr_for_each_entry(&d->children_idr, ch, cid) {
-            unsigned int need;
-
-            if ((ch->flags & NM_FLAG_WHITEOUT) || !nm_child_visible(ch))
-                continue;
-            need = NM_EROFS_DIRENT_SZ + ch->name_len;
-            if (blocksize && used + need > blocksize) {
-                full += blocksize;
-                used = 0;
-            }
-            used += need;
-        }
-        rcu_read_unlock();
-    }
-    return full + used;
-}
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 # define NM_PARENT_INO(dentry) d_parent_ino(dentry)
 #else
@@ -1499,78 +1701,510 @@ static inline loff_t nm_epack_end(const struct nm_epack *p)
     return p->full + p->used;
 }
 
-static int nm_vdir_iterate_erofs(struct file *file, struct dir_context *ctx,
-                                 struct nm_inode_info *info,
-                                 struct nomount_dir_node *d,
-                                 unsigned int blocksize)
+/* ---- erofs-shaped listings ----------------------------------------------------------
+ *
+ * Every valid erofs directory is strictly byte-sorted (lookup binary-searches it), its
+ * d_off steps by the 12-byte dirent within a block, and its terminal is i_size. A listing
+ * the engine serves on an erofs victim is built to the same shape: one sorted stream,
+ * offsets from nm_epack, terminal == the size getattr reports, and nothing past it. */
+struct nm_lent {
+    const char *name;
+    u16 len;
+    u8  dt;
+    u64 ino;
+};
+
+static int nm_lent_cmp(const void *a, const void *b)
+{
+    const struct nm_lent *x = a, *y = b;
+    int r = memcmp(x->name, y->name, min(x->len, y->len));
+
+    if (r) return r;
+    return (int)x->len - (int)y->len;
+}
+
+/* The injected entries a caller may see in a listing, byte-sorted. skip_shadow leaves out
+ * children served in place of a stock entry of the same name. */
+struct nm_ltail {
+    struct nm_lent *e;
+    char *names;
+    unsigned int n;
+};
+
+static void nm_ltail_free(struct nm_ltail *t)
+{
+    kvfree(t->e);
+    kvfree(t->names);
+    t->e = NULL;
+    t->names = NULL;
+    t->n = 0;
+}
+
+static int nm_ltail_collect(struct nomount_dir_node *d, bool skip_shadow, unsigned int extra,
+                            struct nm_ltail *t)
+{
+    struct nomount_child_node *ch;
+    unsigned int cap = extra, bytes = 0, n = 0, off = 0;
+    int id;
+
+    memset(t, 0, sizeof(*t));
+    if (d) {
+        rcu_read_lock();
+        idr_for_each_entry(&d->children_idr, ch, id) {
+            cap++;
+            bytes += min_t(unsigned int, ch->name_len, NAME_MAX);
+        }
+        rcu_read_unlock();
+    }
+    /* Room for adds racing the count; a listing never truncates silently below. */
+    cap += 16;
+    bytes += 16 * NAME_MAX;
+    t->e = kvmalloc_array(cap, sizeof(*t->e), GFP_KERNEL | __GFP_NOWARN);
+    t->names = kvmalloc(bytes, GFP_KERNEL | __GFP_NOWARN);
+    if (!t->e || !t->names) {
+        nm_ltail_free(t);
+        return -ENOMEM;
+    }
+    if (d) {
+        rcu_read_lock();
+        idr_for_each_entry(&d->children_idr, ch, id) {
+            unsigned int l = min_t(unsigned int, ch->name_len, NAME_MAX);
+
+            if (!nm_child_visible(ch) || (ch->flags & NM_FLAG_WHITEOUT))
+                continue;
+            if (skip_shadow && (ch->flags & NM_FLAG_SHADOWS_STOCK))
+                continue;
+            if (n + extra >= cap || off + l > bytes) {
+                rcu_read_unlock();
+                nm_ltail_free(t);
+                return -EAGAIN;
+            }
+            memcpy(t->names + off, ch->name, l);
+            t->e[n].name = t->names + off;
+            t->e[n].len = (u16)l;
+            t->e[n].dt = ch->d_type;
+            t->e[n].ino = ch->fake_ino;
+            off += l;
+            n++;
+        }
+        rcu_read_unlock();
+    }
+    t->n = n;
+    return 0;
+}
+
+/* Emit a sorted array erofs-shaped. At or past the end, f_pos stays where it was. */
+static void nm_emit_lents(struct dir_context *ctx, const struct nm_lent *e, unsigned int n,
+                          unsigned int blocksize)
 {
     struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
-    struct inode *v_inode = file_inode(file);
-    loff_t start = ctx->pos;
+    loff_t start = ctx->pos < 0 ? 0 : ctx->pos;
     bool emitting = false, full = false;
-    int id = 0, k;
+    unsigned int i;
 
-    if (start < 0) start = 0;
+    for (i = 0; i < n; i++) {
+        loff_t off = nm_epack_step(&pk, e[i].len);
 
-    if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
-
-    for (k = 0; ; k++) {
-        char name[NAME_MAX + 1];
-        int nlen;
-        u64 eino;
-        unsigned char dt;
-        loff_t off;
-
-        if (k == 0) {
-            name[0] = '.'; nlen = 1; dt = DT_DIR;
-            eino = (info->flags & NM_FLAG_OVL_INO)
-                 ? (info->v_dino ? info->v_dino : info->v_ino)
-                 : v_inode->i_ino;
-        } else if (k == 1) {
-            name[0] = '.'; name[1] = '.'; nlen = 2; dt = DT_DIR;
-            eino = (info->flags & NM_FLAG_OVL_INO)
-                 ? (info->v_pdino ? info->v_pdino : info->v_ino)
-                 : NM_PARENT_INO(file->f_path.dentry);
-        } else {
-            struct nomount_child_node *child;
-            int found = -1;
-
-            if (!d) break;
-            rcu_read_lock();
-            nlen = 0; eino = 0; dt = 0;
-            while ((child = idr_get_next(&d->children_idr, &id)) != NULL) {
-                if (nm_child_visible(child) && !(child->flags & NM_FLAG_WHITEOUT)) {
-                    found = id;
-                    nlen = min_t(int, (int)child->name_len, NAME_MAX);
-                    memcpy(name, child->name, nlen);
-                    eino = child->fake_ino;
-                    dt = child->d_type;
-                    break;
-                }
-                id++;
-            }
-            rcu_read_unlock();
-            if (found < 0) break;
-            id = found + 1;
-        }
-
-        off = nm_epack_step(&pk, (unsigned int)nlen);
         if (!emitting) {
             if (off < start) continue;
             emitting = true;
         }
         ctx->pos = off;
-        if (!dir_emit(ctx, name, nlen, eino, dt)) {
+        if (!dir_emit(ctx, e[i].name, e[i].len, e[i].ino, e[i].dt)) {
             full = true;
             break;
         }
     }
-
-    if (!full)
+    if (!full && start < nm_epack_end(&pk))
         ctx->pos = nm_epack_end(&pk);
+}
 
+static loff_t nm_lents_size(const struct nm_lent *e, unsigned int n, unsigned int blocksize)
+{
+    struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
+    unsigned int i;
+
+    for (i = 0; i < n; i++)
+        nm_epack_step(&pk, e[i].len);
+    return nm_epack_end(&pk);
+}
+
+/* A synthesized directory: "." and ".." and the visible children, sorted together as
+ * mkfs.erofs sorts them. Slots 0 and 1 of the tail are reserved for the dots. */
+static int nm_vdir_lents(struct nomount_dir_node *d, u64 dot_ino, u64 dotdot_ino,
+                         struct nm_ltail *t)
+{
+    unsigned int i;
+    int err = nm_ltail_collect(d, false, 2, t);
+
+    if (err)
+        return err;
+    for (i = t->n; i > 0; i--)
+        t->e[i + 1] = t->e[i - 1];
+    t->e[0] = (struct nm_lent){ .name = ".", .len = 1, .dt = DT_DIR, .ino = dot_ino };
+    t->e[1] = (struct nm_lent){ .name = "..", .len = 2, .dt = DT_DIR, .ino = dotdot_ino };
+    t->n += 2;
+    sort(t->e, t->n, sizeof(*t->e), nm_lent_cmp, NULL);
+    return 0;
+}
+
+static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize)
+{
+    struct nm_ltail t;
+    loff_t sz;
+
+    if (nm_vdir_lents(d, 0, 0, &t)) {
+        /* Out of memory: the same names packed unsorted, which can only differ at a
+         * block boundary -- better than a size that ignores the children. */
+        struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
+        struct nomount_child_node *ch;
+        int id;
+
+        nm_epack_step(&pk, 1);
+        nm_epack_step(&pk, 2);
+        if (d) {
+            rcu_read_lock();
+            idr_for_each_entry(&d->children_idr, ch, id)
+                if (nm_child_visible(ch) && !(ch->flags & NM_FLAG_WHITEOUT))
+                    nm_epack_step(&pk, min_t(unsigned int, ch->name_len, NAME_MAX));
+            rcu_read_unlock();
+        }
+        return nm_epack_end(&pk);
+    }
+    sz = nm_lents_size(t.e, t.n, blocksize);
+    nm_ltail_free(&t);
+    return sz;
+}
+
+static int nm_vdir_iterate_erofs(struct file *file, struct dir_context *ctx,
+                                 struct nm_inode_info *info,
+                                 struct nomount_dir_node *d,
+                                 unsigned int blocksize)
+{
+    struct inode *v_inode = file_inode(file);
+    u64 dot = (info->flags & NM_FLAG_OVL_INO)
+            ? (info->v_dino ? info->v_dino : info->v_ino) : v_inode->i_ino;
+    u64 dotdot = (info->flags & NM_FLAG_OVL_INO)
+               ? (info->v_pdino ? info->v_pdino : info->v_ino)
+               : NM_PARENT_INO(file->f_path.dentry);
+    struct nm_ltail t;
+
+    if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
+    if (nm_vdir_lents(d, dot, dotdot, &t)) {
+        if (d) nm_dir_node_put(d);
+        return -ENOMEM;
+    }
+    nm_emit_lents(ctx, t.e, t.n, blocksize);
+    nm_ltail_free(&t);
     if (d) nm_dir_node_put(d);
     return 0;
+}
+
+/* A hijacked erofs directory's own entries, "." and ".." included, in on-disk order --
+ * which is byte order. Read once: the image does not change under us. */
+struct nm_rent {
+    u32 noff;
+    u16 len;
+    u8  dt;
+    u64 ino;
+    loff_t roff;        /* the offset erofs itself gave this entry */
+};
+
+struct nm_rlist {
+    bool ok;            /* false: too large to serve this way, use the append path */
+    unsigned int n;
+    struct nm_rent *ent;
+    char *names;
+};
+
+#define NM_RLIST_MAX_ENTS  4096
+#define NM_RLIST_MAX_BYTES (128 * 1024)
+
+/* Sized by a counting pass first, so a five-entry directory holds five entries rather
+ * than the worst case: there is one of these per hijacked erofs directory. */
+struct nm_rlist_walk {
+    struct dir_context ctx;
+    struct nm_rlist *rl;    /* NULL: count only */
+    unsigned int n;
+    unsigned int nbytes;
+    unsigned int cap_n, cap_bytes;
+    bool overflow;
+};
+
+static NM_ACTOR_RET nm_rlist_actor(struct dir_context *ctx, const char *name, int namelen,
+                                   loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_rlist_walk *w = container_of(ctx, struct nm_rlist_walk, ctx);
+    struct nm_rlist *rl = w->rl;
+
+    if (namelen <= 0 || namelen > NAME_MAX || w->n >= w->cap_n ||
+        w->nbytes + (unsigned int)namelen > w->cap_bytes) {
+        w->overflow = true;
+        return !NM_ACTOR_CONTINUE;
+    }
+    if (!rl) {
+        w->n++;
+        w->nbytes += (unsigned int)namelen;
+        return NM_ACTOR_CONTINUE;
+    }
+    rl->ent[rl->n].noff = w->nbytes;
+    rl->ent[rl->n].len = (u16)namelen;
+    rl->ent[rl->n].dt = (u8)dt;
+    rl->ent[rl->n].ino = ino;
+    rl->ent[rl->n].roff = off;
+    memcpy(rl->names + w->nbytes, name, namelen);
+    w->nbytes += (unsigned int)namelen;
+    w->n++;
+    rl->n++;
+    return NM_ACTOR_CONTINUE;
+}
+
+/* kvfree, from an RCU callback too: vfree defers itself in interrupt context. */
+static void nm_rlist_free(struct nm_rlist *rl)
+{
+    if (!rl) return;
+    kvfree(rl->ent);
+    kvfree(rl->names);
+    kfree(rl);
+}
+
+/* With the directory's lock held shared, through the filesystem's own iterate: our fop
+ * is on the file, and going through it would come straight back here. NULL is transient
+ * (out of memory); a list with !ok is the verdict "too large", kept so it is not retried. */
+static struct nm_rlist *nm_rlist_build(struct file *file, const struct file_operations *orig_fop)
+{
+    struct nm_rlist_walk c = { .ctx.actor = nm_rlist_actor, .cap_n = NM_RLIST_MAX_ENTS,
+                               .cap_bytes = NM_RLIST_MAX_BYTES };
+    struct nm_rlist_walk w = { .ctx.actor = nm_rlist_actor };
+    struct nm_rlist *rl = kzalloc(sizeof(*rl), GFP_KERNEL | __GFP_NOWARN);
+
+    if (!rl) return NULL;
+    c.ctx.pos = 0;
+    if (nm_call_iterate(file, &c.ctx, orig_fop) < 0) {
+        nm_rlist_free(rl);
+        return NULL;
+    }
+    if (c.overflow || c.n < 2)
+        return rl;                  /* ok == false: served by the append path */
+    rl->ent = kvmalloc_array(c.n, sizeof(*rl->ent), GFP_KERNEL | __GFP_NOWARN);
+    rl->names = kvmalloc(c.nbytes ? c.nbytes : 1, GFP_KERNEL | __GFP_NOWARN);
+    if (!rl->ent || !rl->names) {
+        nm_rlist_free(rl);
+        return NULL;
+    }
+    w.rl = rl;
+    w.cap_n = c.n;
+    w.cap_bytes = c.nbytes;
+    w.ctx.pos = 0;
+    if (nm_call_iterate(file, &w.ctx, orig_fop) < 0) {
+        nm_rlist_free(rl);
+        return NULL;
+    }
+    rl->ok = !w.overflow && rl->n == c.n;
+    /* Only where nm_epack reproduces this image exactly -- every real offset and the
+     * terminal -- so a caller shown no injected entry still gets a byte-identical listing
+     * from the merged path. Otherwise the append path serves it, as before. */
+    if (rl->ok) {
+        struct nm_epack pk = { .blocksize = file_inode(file)->i_sb->s_blocksize,
+                               .full = 0, .used = 0, .slot = 0 };
+        unsigned int i;
+
+        for (i = 0; i < rl->n && rl->ok; i++)
+            if (nm_epack_step(&pk, rl->ent[i].len) != rl->ent[i].roff)
+                rl->ok = false;
+        if (rl->ok && nm_epack_end(&pk) != i_size_read(file_inode(file)))
+            rl->ok = false;
+        for (i = 1; i < rl->n && rl->ok; i++) {
+            const struct nm_rent *x = &rl->ent[i - 1], *y = &rl->ent[i];
+            struct nm_lent a = { .name = rl->names + x->noff, .len = x->len };
+            struct nm_lent b = { .name = rl->names + y->noff, .len = y->len };
+
+            if (nm_lent_cmp(&a, &b) >= 0)
+                rl->ok = false;
+        }
+        if (!rl->ok)
+            nm_debug("erofs listing of ino %lu does not match the packing model; appending\n",
+                     file_inode(file)->i_ino);
+    }
+    if (!rl->ok) {
+        kvfree(rl->ent);
+        kvfree(rl->names);
+        rl->ent = NULL;
+        rl->names = NULL;
+        rl->n = 0;
+    }
+    return rl;
+}
+
+static struct nm_rlist *nm_rlist_get(struct nomount_dir_node *d, struct file *file,
+                                     const struct file_operations *orig_fop)
+{
+    struct nm_rlist *rl = smp_load_acquire(&d->rlist);
+
+    if (!rl && file && orig_fop) {
+        struct nm_rlist *nrl = nm_rlist_build(file, orig_fop);
+
+        if (!nrl)
+            return NULL;
+        if (cmpxchg(&d->rlist, NULL, nrl) != NULL)
+            nm_rlist_free(nrl);
+        rl = smp_load_acquire(&d->rlist);
+    }
+    return (rl && rl->ok) ? rl : NULL;
+}
+
+/* Built when a directory is hijacked, so getattr never has to read it. */
+static void nm_rlist_prime(struct nomount_dir_node *d, const struct path *p, struct inode *dir)
+{
+    const struct file_operations *orig_fop = NULL;
+    const struct cred *old;
+    struct nm_fop *nf;
+    struct file *f;
+
+    if (!d || smp_load_acquire(&d->rlist) || dir->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
+        return;
+    rcu_read_lock();
+    nf = nm_get_fop(smp_load_acquire(&dir->i_fop));
+    orig_fop = nf ? nf->orig_fop : NULL;
+    rcu_read_unlock();
+    if (!orig_fop)
+        return;
+    old = override_creds(nm_root_cred);
+    f = dentry_open(p, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    if (!IS_ERR(f)) {
+        inode_lock_shared(dir);
+        nm_rlist_get(d, f, orig_fop);
+        inode_unlock_shared(dir);
+        fput(f);
+    }
+    revert_creds(old);
+}
+
+/* What this caller gets in place of a stock entry: itself, a shadowing child's identity,
+ * or nothing (a whiteout or a hidden-for-it name). The proxy actor's rule, in one place. */
+static bool nm_real_entry_for_caller(struct nomount_dir_node *d, struct nm_lent *e)
+{
+    struct nomount_child_node *child;
+    u32 hash = full_name_hash(NULL, e->name, e->len);
+    bool keep = true;
+
+    if (!(READ_ONCE(d->bloom_mask) & (1ULL << (hash & 63))))
+        return true;
+    rcu_read_lock();
+    hash_for_each_possible_rcu(d->children_ht, child, hnode, hash) {
+        if (child->name_hash == hash && child->name_len == e->len &&
+            memcmp(child->name, e->name, e->len) == 0) {
+            if (nm_child_visible(child)) {
+                if ((child->flags & NM_FLAG_SHADOWS_STOCK) &&
+                    !(child->flags & NM_FLAG_WHITEOUT)) {
+                    e->ino = child->fake_ino;
+                    e->dt = child->d_type;
+                } else {
+                    keep = false;
+                }
+            }
+            break;
+        }
+    }
+    rcu_read_unlock();
+    return keep;
+}
+
+/* The real list (already in byte order) and this caller's sorted tail, merged. */
+struct nm_mwalk {
+    const struct nm_rlist *rl;
+    const struct nm_ltail *t;
+    struct nomount_dir_node *d;
+    unsigned int i, j;
+};
+
+static bool nm_mwalk_next(struct nm_mwalk *w, struct nm_lent *out)
+{
+    struct nm_lent r;
+    bool have_r = false;
+
+    while (w->i < w->rl->n) {
+        const struct nm_rent *re = &w->rl->ent[w->i];
+
+        r.name = w->rl->names + re->noff;
+        r.len = re->len;
+        r.dt = re->dt;
+        r.ino = re->ino;
+        if (nm_real_entry_for_caller(w->d, &r)) {
+            have_r = true;
+            break;
+        }
+        w->i++;
+    }
+    if (w->j < w->t->n && (!have_r || nm_lent_cmp(&w->t->e[w->j], &r) < 0)) {
+        *out = w->t->e[w->j++];
+        return true;
+    }
+    if (have_r) {
+        *out = r;
+        w->i++;
+        return true;
+    }
+    return false;
+}
+
+static int nm_hijacked_erofs_listing(struct file *file, struct dir_context *ctx,
+                                     struct nomount_dir_node *pdir,
+                                     const struct file_operations *orig_fop)
+{
+    unsigned int bs = file_inode(file)->i_sb->s_blocksize;
+    struct nm_epack pk = { .blocksize = bs, .full = 0, .used = 0, .slot = 0 };
+    /* Built lazily only at the start of a listing, so one listing never changes path
+     * halfway through: the two paths number positions differently. */
+    struct nm_rlist *rl = nm_rlist_get(pdir, ctx->pos == 0 ? file : NULL, orig_fop);
+    loff_t start = ctx->pos < 0 ? 0 : ctx->pos;
+    bool emitting = false, full = false;
+    struct nm_mwalk w;
+    struct nm_ltail t;
+    struct nm_lent e;
+
+    if (!rl)
+        return 1;
+    if (nm_ltail_collect(pdir, true, 0, &t))
+        return -ENOMEM;
+    sort(t.e, t.n, sizeof(*t.e), nm_lent_cmp, NULL);
+    w = (struct nm_mwalk){ .rl = rl, .t = &t, .d = pdir, .i = 0, .j = 0 };
+    while (nm_mwalk_next(&w, &e)) {
+        loff_t off = nm_epack_step(&pk, e.len);
+
+        if (!emitting) {
+            if (off < start) continue;
+            emitting = true;
+        }
+        ctx->pos = off;
+        if (!dir_emit(ctx, e.name, e.len, e.ino, e.dt)) {
+            full = true;
+            break;
+        }
+    }
+    if (!full && start < nm_epack_end(&pk))
+        ctx->pos = nm_epack_end(&pk);
+    nm_ltail_free(&t);
+    return 0;
+}
+
+static bool nm_hijacked_erofs_size(struct nomount_dir_node *d, unsigned int bs, loff_t *out)
+{
+    struct nm_epack pk = { .blocksize = bs, .full = 0, .used = 0, .slot = 0 };
+    struct nm_rlist *rl = nm_rlist_get(d, NULL, NULL);
+    struct nm_mwalk w;
+    struct nm_ltail t;
+    struct nm_lent e;
+
+    if (!rl || nm_ltail_collect(d, true, 0, &t))
+        return false;
+    sort(t.e, t.n, sizeof(*t.e), nm_lent_cmp, NULL);
+    w = (struct nm_mwalk){ .rl = rl, .t = &t, .d = d, .i = 0, .j = 0 };
+    while (nm_mwalk_next(&w, &e))
+        nm_epack_step(&pk, e.len);
+    *out = nm_epack_end(&pk);
+    nm_ltail_free(&t);
+    return true;
 }
 
 #define NM_DSNAP_MAX_ENTS  1024
@@ -1697,7 +2331,7 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
         }
         fput(dir);
     } else {
-        nm_warn_once("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
+        nm_debug("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
         cannot_build = true;
     }
     revert_creds(old);
@@ -1857,7 +2491,8 @@ static int nm_dsnap_iterate(struct file *file, struct dir_context *ctx,
         ctx->pos = off;
         if (!dir_emit(ctx, name, nlen, eino, dt)) { full = true; break; }
     }
-    if (!full)
+    /* At or past the end erofs leaves f_pos where it was. */
+    if (!full && start < nm_epack_end(&pk))
         ctx->pos = nm_epack_end(&pk);
     return 0;
 }
@@ -2029,6 +2664,21 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (stat->nlink != 1)
         nm_dir_nlink_fix(stat, nld);
 
+    /* erofs: the size of the listing this caller gets, packed the same way, so its
+     * terminal d_off and st_size agree. */
+    if (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1) {
+        loff_t sz;
+        unsigned int bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : 4096;
+
+        if (nm_hijacked_erofs_size(d, bs, &sz)) {
+            if (sz != stat->size) {
+                stat->size = sz;
+                stat->blocks = (blkcnt_t)(round_up(sz, (loff_t)bs) >> 9);
+            }
+            goto out;
+        }
+    }
+
     /* Same gate as nm_dir_stat_fix: a victim left unfixed among fixed children is the tell. */
     if (delta && (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 ||
                   READ_ONCE(nm_vdir_erofs_size)) &&
@@ -2135,6 +2785,10 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
         stat->result_mask |= info->v_result_mask & STATX_BTIME;
 #endif
         nm_mirror_stat(info, v_inode, stat);
+        /* i_blocks is 0 on an overlay victim (FIOQSIZE), but a stock overlay directory
+         * stats the real directory's blocks. */
+        if (!stat->blocks && nm_victim_is_overlay(v_inode->i_sb))
+            stat->blocks = 8;
         stat->nlink = nm_vdir_nlink(info->dir_node);
         if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
             unsigned long vbs = v_inode->i_sb->s_blocksize;
@@ -2157,7 +2811,7 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
             if (!nm_dsnap_size_fix(info, v_inode, stat))
                 nm_dir_stat_fix(info, v_inode, stat);
         } else {
-            nm_mirror_blocks(info, stat);
+            nm_mirror_blocks(info, v_inode, &info->r_path, stat);
         }
     }
     return res;
@@ -2239,8 +2893,13 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     struct inode *real_inode;
     struct dentry *target_dentry;
     struct path *stock;
+
+    /* RCU-walk: nothing pins this inode, and destroy NULLs the paths read below between
+     * the two loads. -ECHILD makes the VFS retry in ref-walk, holding the dentry. */
+    if (!dentry)
+        return ERR_PTR(-ECHILD);
     if (unlikely(!info || !info->r_path.dentry))
-        return ERR_PTR(dentry ? -EIO : -ECHILD);
+        return ERR_PTR(-EIO);
 
     if (unlikely(nm_hidden_from_caller(info)))
         return ERR_PTR(-ENOENT);
@@ -2287,6 +2946,11 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     struct nm_inode_info *info = file_inode(file)->i_private;
     struct nomount_dir_node *dir_node = info ? info->dir_node : NULL;
     struct file *real_file = file->private_data;
+    /* A uid-blocked caller is served info->s_path, a position space of its own. */
+    bool stock_space = real_file && info && info->r_path.dentry &&
+                       real_file->f_path.dentry != info->r_path.dentry;
+    loff_t start = ctx->pos;
+    loff_t eof = 0;
     int res = 0;
 
     if (likely(info)) {
@@ -2315,7 +2979,12 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         }
     }
 
-    if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
+    if (stock_space) {
+        if (unlikely(nm_is_stock_virtual_pos(dir_node, ctx->pos))) {
+            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true);
+            return 0;
+        }
+    } else if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
         nomount_emit_virtual_children(ctx, dir_node,
                                       !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
         return 0;
@@ -2328,31 +2997,36 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
             .dir_info = (info && real_file->f_path.dentry == info->r_path.dentry)
                         ? info : NULL,
             .emitted = 0,
-            .refused = false
+            .refused = false,
+            .stock_space = stock_space,
         };
         res = iterate_dir(real_file, &proxy_ctx.ctx);
         ctx->pos = proxy_ctx.ctx.pos;
+        if (dir_node && res >= 0 && !proxy_ctx.refused && proxy_ctx.emitted > 0)
+            WRITE_ONCE(*(stock_space ? &dir_node->stock_end : &dir_node->real_end), ctx->pos);
         if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) return res;
         if (!dir_node) return res;
-        /* Only a caller being served r_path may write r_path's position space. A
-         * uid-blocked caller gets info->s_path instead (nm_open), and its terminating
-         * pass used to publish the STOCK directory's terminal position into the same
-         * dir_node -- moving the base that every other reader's saved d_off is decoded
-         * against. It has no visible injected children by construction, so there is
-         * nothing to pack a position for either: return after the proxy pass.
-         *
-         * proxy_ctx.dir_info above already computes exactly this test for its own
-         * purposes; reusing the comparison keeps the two from drifting apart. */
-        if (info && info->r_path.dentry &&
-            real_file->f_path.dentry != info->r_path.dentry)
+        /* A uid-blocked caller lists info->s_path, in that directory's own position space:
+         * it must not publish into r_path's, which every other reader decodes against. It
+         * still gets the PUBLIC children lookup serves it, or stat would find a name
+         * getdents omits (regressions-13). */
+        if (stock_space) {
+            loff_t sbase = READ_ONCE(dir_node->stock_eof);
+
+            if (sbase && start > sbase && start != READ_ONCE(dir_node->stock_end))
+                return res;
+            nm_publish_stock_eof(dir_node, ctx->pos);
+            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true);
+            return res;
+        }
+        eof = READ_ONCE(dir_node->real_eof);
+        if (eof && start > eof && start != READ_ONCE(dir_node->real_end))
             return res;
         nm_publish_real_eof(dir_node, ctx->pos);
-        ctx->pos = nm_pack_pos(dir_node, 0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
         if (ctx->pos < 2 && !nm_emit_dots(file, ctx, info)) return 0;
         if (!dir_node) return 0;
         nm_publish_real_eof(dir_node, 2);
-        ctx->pos = nm_pack_pos(dir_node, 0);
     } else {
         return -ENOTDIR;
     }
@@ -2414,6 +3088,7 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
             }
             ri.flags = (info->flags & (NM_FLAG_OVL_INO | NM_FLAG_PUBLIC)) |
                        NM_FLAG_SHADOWS_STOCK | NM_FLAG_STOCK_ONLY;
+            ri.v_scope = info->v_scope;
             ri.s_path.mnt = stock->mnt;
             ri.s_path.dentry = child;
             path_get(&ri.s_path);
@@ -2499,6 +3174,20 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     ri.v_dio_mem = info->v_dio_mem;
     ri.v_dio_off = info->v_dio_off;
     ri.v_cap   = info->v_cap;
+    ri.v_fa    = info->v_fa;
+    ri.v_cfile = info->v_cfile;
+    ri.v_scope = info->v_scope;
+    /* A file child mirrors a stock FILE, not this directory: erofs reports DIOALIGN and
+     * maps THP-aligned only for regular files. Times and label stay the directory's. */
+    if (!(ri.flags & NM_FLAG_IS_DIR) && info->v_cfile.known) {
+        ri.v_attributes  = info->v_cfile.attributes;
+        ri.v_attr_mask   = info->v_cfile.attr_mask;
+        ri.v_result_mask = info->v_cfile.result_mask;
+        ri.v_dio_mem = info->v_cfile.dio_mem;
+        ri.v_dio_off = info->v_cfile.dio_off;
+        ri.v_cap     = info->v_cfile.cap;
+        ri.v_fa      = info->v_cfile.fa;
+    }
     ri.v_uid   = info->v_uid;
     ri.v_gid   = info->v_gid;
     ri.v_mode  = info->v_mode;
@@ -2535,8 +3224,13 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
     if (info && info->dir_node) {
         u32 v_hash = full_name_hash(NULL, name, len);
         struct nm_rule_info rule_info;
-        if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info, true)) {
-            hidden_rule = nm_uid_hidden(rule_info.flags);
+        if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info, true, true)) {
+            /* As nomount_hijacked_lookup: an unserved caller shares the injected dentry
+             * when it stands in for a stock file, and is handed the stock one by the ops. */
+            hidden_rule = !nm_rinfo_served(&rule_info) &&
+                          !(rule_info.r_path.dentry && d_backing_inode(rule_info.r_path.dentry) &&
+                            nm_shareable_stock(d_backing_inode(rule_info.r_path.dentry)->i_mode,
+                                               &rule_info.s_path, dir->i_sb, rule_info.flags));
             if (!hidden_rule) {
                 if (rule_info.flags & NM_FLAG_WHITEOUT) {
                     nm_install_dentry_ops(dentry); d_add(dentry, NULL);
@@ -2701,8 +3395,8 @@ static bool nm_stock_only_mismatch(struct dentry *dentry)
     struct inode *ino = dentry->d_inode;
     struct nm_inode_info *ii = ino ? ino->i_private : NULL;
 
-    return ii && (ii->flags & NM_FLAG_STOCK_ONLY) &&
-           !nomount_is_uid_blocked(current_uid().val);
+    /* A stock-only child was made for a caller its directory's rule does not serve. */
+    return ii && (ii->flags & NM_FLAG_STOCK_ONLY) && nm_info_served(ii);
 }
 
 static bool nm_is_passthrough_child(struct inode *parent_dir, struct dentry *dentry)
@@ -2740,6 +3434,18 @@ static bool nm_is_passthrough_child(struct inode *parent_dir, struct dentry *den
  * the rule's own: nm_inode_info.flags is assigned FROM rule_info.flags, so both sides come
  * through the same synthesis.
  */
+static bool nm_scope_copy_eq(const struct nm_scope_copy *a, const struct nm_scope_copy *b)
+{
+    u8 i;
+
+    if (a->uid != b->uid || a->uid_end != b->uid_end || a->deny_n != b->deny_n)
+        return false;
+    for (i = 0; i < a->deny_n && i < NM_DENY_MAX; i++)
+        if (a->deny[i] != b->deny[i])
+            return false;
+    return true;
+}
+
 static bool nm_reval_info_agrees(struct dentry *dentry, const struct nm_rule_info *ri)
 {
     const struct nm_inode_info *info;
@@ -2752,7 +3458,9 @@ static bool nm_reval_info_agrees(struct dentry *dentry, const struct nm_rule_inf
            info->flags == ri->flags &&
            info->v_ino == ri->v_ino &&
            info->v_dev == ri->v_dev &&
-           info->v_dino == ri->v_dino;
+           info->v_dino == ri->v_dino &&
+           info->v_pdino == ri->v_pdino &&
+           nm_scope_copy_eq(&info->v_scope, &ri->v_scope);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
@@ -2777,17 +3485,22 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         rinfo = READ_ONCE(ino->i_private);
         if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
             return -ECHILD;
-        /* A scope is per-caller but this cached verdict is not, so RCU cannot
-         * honour it. Hand scoped names to the ref-walk path, which re-matches.
-         */
-        if (rinfo->flags & NM_FLAG_UID_SCOPED)
+        if ((rinfo->flags & NM_FLAG_STOCK_ONLY) && nm_info_served(rinfo))
             return -ECHILD;
-        if (nm_uid_hidden(rinfo->flags) &&
-            (rinfo->flags & NM_FLAG_SHADOWS_STOCK) && !rinfo->s_path.dentry)
-            return -ECHILD;
-        if ((rinfo->flags & NM_FLAG_STOCK_ONLY) &&
-            !nomount_is_uid_blocked(current_uid().val))
-            return -ECHILD;
+        /* Decided per caller from the scope the inode carries, never by invalidating
+         * the dentry: that would unhash it for every process, and every mapping of it
+         * would then read "(deleted)". An added name is absent for an unserved caller,
+         * and a negative return other than 0 fails its lookup without touching the
+         * dentry. A replaced one is served stock by the inode's ops. */
+        if (!(rinfo->flags & NM_FLAG_STOCK_ONLY) && !nm_info_served(rinfo)) {
+            if (!(rinfo->flags & NM_FLAG_SHADOWS_STOCK))
+                return nm_absent_errno(ino, flags);
+            /* Not shareable: as before this change, a hide-list caller keeps it where there
+             * is a stock file to serve, and anyone else re-walks. */
+            if (!nm_shareable_stock(ino->i_mode, &rinfo->s_path, ino->i_sb, rinfo->flags) &&
+                !(nm_uid_hidden(rinfo->flags) && rinfo->s_path.dentry))
+                return -ECHILD;
+        }
         return 1;
     }
 
@@ -2820,7 +3533,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
 
             if (nm_stock_only_mismatch(dentry))
                 return 0;
-            if (ii && nm_uid_hidden(ii->flags) &&
+            if (ii && !nm_info_served(ii) &&
                 (ii->flags & NM_FLAG_SHADOWS_STOCK) && !ii->s_path.dentry)
                 return 0;
             if (nm_is_passthrough_child(parent_dir, dentry))
@@ -2835,49 +3548,65 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     }
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
-    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info, false)) {
+    /* Matched whoever is asking; who is served is decided below from the scope. */
+    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info,
+                              false, true)) {
+        bool served = nm_rinfo_served(&rule_info);
+
         nm_put_rule_info(&rule_info);
         nm_dir_node_put(pdir);
         if (rule_info.flags & NM_FLAG_WHITEOUT) {
-            if (nm_uid_hidden(rule_info.flags))
-                return 0;
-            return d_is_negative(dentry) ? 1 : 0;
+            /* Stock for a caller the whiteout does not serve, absence for one it does --
+             * and for that one a real stock dentry fails the lookup rather than being
+             * unhashed under whoever has it mapped. */
+            if (!served)
+                return d_is_negative(dentry) ? 0 : 1;
+            return d_is_negative(dentry) ? 1 : nm_absent_errno(dentry->d_inode, flags);
         }
+        if (injected) {
+            struct nm_inode_info *ii = dentry->d_inode->i_private;
 
-        if (nm_uid_hidden(rule_info.flags)) {
-            if (injected) {
-                struct nm_inode_info *ii = dentry->d_inode->i_private;
-                if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK) ||
-                    (ii && ii->s_path.dentry))
-                    return nm_reval_info_agrees(dentry, &rule_info)
-                               ? nm_reval_fresh(dentry, gen) : 0;
+            if (nm_stock_only_mismatch(dentry))
                 return 0;
+            if (!nm_reval_info_agrees(dentry, &rule_info))
+                return 0;               /* the rule changed under this dentry */
+            if (served)
+                return nm_reval_fresh(dentry, gen);
+            /* Unserved: never invalidate the shared dentry (every mapping of it would read
+             * "(deleted)"). An added name fails this caller's lookup only; a replaced one
+             * is handed the stock file by the inode's ops. */
+            if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK)) {
+                nm_reval_fresh(dentry, gen);    /* keep the RCU arm deciding it */
+                return nm_absent_errno(dentry->d_inode, flags);
             }
-            return 1;
-        }
-        if (injected && nm_stock_only_mismatch(dentry))
-            return 0;
-        if (injected)
-            return nm_reval_info_agrees(dentry, &rule_info)
+            if (ii && nm_shareable_stock(dentry->d_inode->i_mode, &ii->s_path,
+                                         dentry->d_sb, ii->flags))
+                return nm_reval_fresh(dentry, gen);
+            /* Not shareable: as before this change. */
+            return (nm_uid_hidden(rule_info.flags) && ii && ii->s_path.dentry)
                        ? nm_reval_fresh(dentry, gen) : 0;
+        }
+        /* A real dentry under a name with a rule: right for a caller the rule does not
+         * serve; a caller it does serve drops it to reach the injected one. */
+        if (!served)
+            return 1;
         return nm_reval_stale(dentry);
-    }
-    /* The name has a rule this caller is scoped out of (system_server under
-     * --uid-excluded 1000), and the dentry is the real one: that is what this
-     * caller should get, so it stays cached for them rather than being looked
-     * up again on every open. A caller the rule does apply to drops it above.
-     * As upstream does since d6cb715.
-     */
-    if (!injected && nm_name_has_hidden_uid_rule(pdir, dentry->d_name.name,
-                                                 dentry->d_name.len, hash)) {
-        nm_dir_node_put(pdir);
-        return 1;
     }
     nm_dir_node_put(pdir);
     if (injected && nm_stock_only_mismatch(dentry))
         return 0;
-    if (injected && nm_is_passthrough_child(parent_dir, dentry))
+    if (injected && nm_is_passthrough_child(parent_dir, dentry)) {
+        struct nm_inode_info *ii = dentry->d_inode->i_private;
+
+        /* A module-only child, for a caller its directory's rule does not serve: absent,
+         * as the RCU arm answers it, without unhashing it. */
+        if (ii && !nm_info_served(ii) &&
+            !(ii->flags & (NM_FLAG_SHADOWS_STOCK | NM_FLAG_STOCK_ONLY))) {
+            nm_reval_fresh(dentry, gen);
+            return nm_absent_errno(dentry->d_inode, flags);
+        }
         return nm_reval_fresh(dentry, gen);
+    }
     return nm_reval_stale(dentry);
 }
 
@@ -2970,6 +3699,46 @@ static int nm_inode_permission(IDMAP_ARG struct inode *inode, int mask)
 #endif
 }
 
+#ifdef NM_HAVE_FILEATTR
+/* FS_IOC_GETFLAGS / FS_IOC_FSGETXATTR reach fileattr_get, never ->unlocked_ioctl (5.13+),
+ * so without this an engine inode answered ENOTTY where an ext4/f2fs sibling answers flags
+ * and an overlay one EACCES. A shadowing rule asks its stock file; a pure injection
+ * replays what its stock sibling answered when the rule was made. -ENOIOCTLCMD continues
+ * to ->unlocked_ioctl, which is what a stock inode without fileattr_get gives too. */
+static int nm_fileattr_get(struct dentry *dentry, nm_fattr_t *fa)
+{
+    struct inode *inode = d_inode(dentry);
+    struct nm_inode_info *info = inode ? inode->i_private : NULL;
+    const struct path *src = NULL;
+    struct inode *si;
+    int k;
+
+    if (unlikely(!info))
+        return -ENOIOCTLCMD;
+    if (unlikely(nm_hidden_from_caller(info)))
+        return -ENOENT;
+    if (info->s_path.dentry) {
+        src = &info->s_path;
+    } else if (S_ISLNK(inode->i_mode)) {
+        return -ENOIOCTLCMD;        /* no symlink iops has fileattr_get */
+    } else if (info->v_fa.known) {
+        k = fa->fsx_valid ? 1 : 0;
+        if (info->v_fa.err[k])
+            return info->v_fa.err[k];
+        *fa = info->v_fa.fa[k];
+        return 0;
+    } else if ((info->flags & NM_FLAG_VIRTUAL_DIR) || nm_victim_ro_image(inode->i_sb)) {
+        return -ENOIOCTLCMD;
+    } else {
+        src = &info->r_path;
+    }
+    si = src->dentry ? d_backing_inode(src->dentry) : NULL;
+    if (!si || !si->i_op || !si->i_op->fileattr_get)
+        return -ENOIOCTLCMD;
+    return si->i_op->fileattr_get(src->dentry, fa);
+}
+#endif
+
 static const struct inode_operations nm_file_iops = {
     .permission = nm_inode_permission,
     .getattr = nm_file_getattr,
@@ -2977,6 +3746,9 @@ static const struct inode_operations nm_file_iops = {
     .listxattr = nm_listxattr,
     .get_link = nm_get_link,
     .fiemap = nm_fiemap,
+#ifdef NM_HAVE_FILEATTR
+    .fileattr_get = nm_fileattr_get,
+#endif
 };
 
 /* The ioctl pair is here for the same reason it is on all four nm_file_fops tables, and
@@ -3021,6 +3793,9 @@ static const struct inode_operations nm_dir_iops = {
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
+#ifdef NM_HAVE_FILEATTR
+    .fileattr_get = nm_fileattr_get,
+#endif
 };
 
 static const struct dentry_operations nm_dops = {
@@ -3110,8 +3885,10 @@ static const struct dentry_operations *nm_get_dops_chain(const struct dentry_ope
         c->ops.d_revalidate = nm_d_revalidate_chain;
         c->orig = orig;
         /* Readers find the entry through a dentry's d_op, never through the
-         * count, so publishing the count needs no ordering of its own.
+         * count, so publishing the count needs no ordering of its own. The table
+         * itself does: the caller's later d_op store must not be seen before it.
          */
+        smp_wmb();
         nm_dops_chain_n++;
         ret = &c->ops;
     } else if (!warned) {
@@ -3281,18 +4058,33 @@ static void nomount_hijacked_put_super(struct super_block *sb)
      * last reference to the virtual dir_node, and the surviving child was left pointing at
      * freed slab: the next del or clear did atomic_inc_not_zero() and an idr walk on it.
      *
-     * Every member of a virtual subtree resolves to the same real node, so each one now
-     * matches in its own iteration of this loop -- no nested removal, and by the time the
-     * victims are freed nm_detach_rule_locked() has nulled every parent_dir among them.
+     * Resolve every rule BEFORE detaching any. Detaching nulls parent_dir, so in a single
+     * pass an intermediate visited first cut its descendants off from the walk and they
+     * stayed in the table, listed and matched by del but serving nothing. victim_node is
+     * unused while a rule is live, so it carries the collected set between the passes.
      */
-    mutex_lock(&nomount_write_mutex);
-    hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
-        struct nomount_dir_node *d = nm_real_dir_node_of(rule->parent_dir);
+    {
+        HLIST_HEAD(dying);
+        bool any = false;
 
-        if (d && d->dir_inode && d->dir_inode->i_sb == sb)
+        mutex_lock(&nomount_write_mutex);
+        hash_for_each(nomount_rules_ht, bkt, rule, vpath_node) {
+            struct nomount_dir_node *d = nm_real_dir_node_of(rule->parent_dir);
+
+            if (d && d->dir_inode && d->dir_inode->i_sb == sb)
+                hlist_add_head(&rule->victim_node, &dying);
+        }
+        hlist_for_each_entry_safe(rule, tmp, &dying, victim_node) {
+            hlist_del(&rule->victim_node);
             nm_detach_rule_locked(rule, &victims, false);
+            any = true;
+        }
+        if (any)
+            atomic_inc(&nm_rule_gen);
+        /* A recycled anon dev number must not inherit this filesystem's placement state. */
+        nm_forget_dev_caches(sb->s_dev);
+        mutex_unlock(&nomount_write_mutex);
     }
-    mutex_unlock(&nomount_write_mutex);
     if (!hlist_empty(&victims)) {
         synchronize_rcu();
         hlist_for_each_entry_safe(rule, tmp, &victims, victim_node)
@@ -3302,6 +4094,8 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     if (nm_sop) {
         int i = 0;
         orig_put = nm_sop->orig_sop ? nm_sop->orig_sop->put_super : NULL;
+        if (nm_sop->orig_export)
+            smp_store_release(&sb->s_export_op, nm_sop->orig_export);
         smp_store_release(&sb->s_op, nm_sop->orig_sop);
         if (nm_sop->fake_xattr) {
             smp_store_release((const struct xattr_handler ***)&sb->s_xattr, nm_sop->orig_xattr);
@@ -3337,12 +4131,138 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     if (orig_put) orig_put(sb);
 }
 
+static inline bool nm_is_own_inode(const struct inode *inode);
+
+static const struct export_operations *nm_orig_export(struct super_block *sb)
+{
+    const struct export_operations *orig = NULL;
+    struct nm_sop *nm_sop;
+
+    rcu_read_lock();
+    nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop,
+                      destroy_inode, nomount_hijacked_destroy_inode);
+    if (nm_sop)
+        orig = nm_sop->orig_export;
+    rcu_read_unlock();
+    return orig;
+}
+
+/* The stock inode a shadowing engine inode stands in for, on the same sb, referenced:
+ * s_path may be its only holder, and a delete on a writable victim drops the inode. */
+static struct inode *nm_shadowed_inode(struct inode *inode)
+{
+    struct nm_inode_info *info;
+    struct dentry *d;
+    struct inode *s = NULL;
+
+    if (!nm_is_own_inode(inode))
+        return NULL;
+    info = READ_ONCE(inode->i_private);
+    d = info ? info->s_path.dentry : NULL;
+    if (!d)
+        return NULL;
+    spin_lock(&d->d_lock);
+    if (d->d_inode && d->d_inode->i_sb == inode->i_sb && !nm_is_own_inode(d->d_inode))
+        s = igrab(d->d_inode);
+    spin_unlock(&d->d_lock);
+    return s;
+}
+
+#define NM_FILEID_INO64_GEN         0x81
+#define NM_FILEID_INO64_GEN_PARENT  0x82
+
+/* An engine inode comes from the victim's own alloc_inode() with the fs-private part left
+ * zero. Two encoders read that part: overlayfs dereferences the NULL lower inode (an oops
+ * from any app's inotify fdinfo) and erofs prints nid 0 beside the in-band ino. On those two
+ * an engine inode gets the handle stock would give it; every other encoder only reads
+ * generic inode fields and is called as before.
+ */
+static int nm_encode_fh(struct inode *inode, u32 *fh, int *max_len, struct inode *parent)
+{
+    struct super_block *sb = inode->i_sb;
+    const struct export_operations *orig = nm_orig_export(sb);
+    struct inode *si, *sp;
+    int len, ret;
+
+    if (!orig || !orig->encode_fh)
+        return FILEID_INVALID;
+    if (sb->s_magic != EROFS_SUPER_MAGIC_V1
+#ifdef OVERLAYFS_SUPER_MAGIC
+        && sb->s_magic != OVERLAYFS_SUPER_MAGIC
+#endif
+       )
+        return orig->encode_fh(inode, fh, max_len, parent);
+
+    si = nm_shadowed_inode(inode);
+    sp = parent ? nm_shadowed_inode(parent) : NULL;
+    if (si)
+        inode = si;
+    if (sp)
+        parent = sp;
+    if (!nm_is_own_inode(inode) && !(parent && nm_is_own_inode(parent))) {
+        ret = orig->encode_fh(inode, fh, max_len, parent);
+        goto out;
+    }
+    /* ovl_encode_fh answers this for a connectable request and for any encode error. */
+    ret = FILEID_INVALID;
+    if (sb->s_magic != EROFS_SUPER_MAGIC_V1)
+        goto out;
+    /* erofs_encode_fh's layout; a stock erofs inode's i_ino is its nid on 64-bit. */
+    len = parent ? 6 : 3;
+    if (*max_len < len) {
+        *max_len = len;
+        goto out;
+    }
+    fh[0] = (u32)((u64)inode->i_ino >> 32);
+    fh[1] = (u32)inode->i_ino;
+    fh[2] = inode->i_generation;
+    if (parent) {
+        fh[3] = (u32)((u64)parent->i_ino >> 32);
+        fh[4] = (u32)parent->i_ino;
+        fh[5] = parent->i_generation;
+    }
+    *max_len = len;
+    ret = parent ? NM_FILEID_INO64_GEN_PARENT : NM_FILEID_INO64_GEN;
+out:
+    if (sp)
+        iput(sp);
+    if (si)
+        iput(si);
+    return ret;
+}
+
+/* Only the filesystems the engine is built for. kernfs (sysfs, cgroup) identifies its
+ * superblocks by s_op pointer and BUG()s on a foreign one. Checked before ANY hijack of an
+ * inode on the superblock, not only its s_op: a refused one would otherwise keep our
+ * per-inode op copies, and code comparing f_op against its own table would miss. */
+static bool nm_sb_supported(const struct super_block *sb)
+{
+    switch (sb->s_magic) {
+    case EROFS_SUPER_MAGIC_V1:
+    case EXT4_SUPER_MAGIC:
+    case F2FS_SUPER_MAGIC:
+    case SQUASHFS_MAGIC:
+    case TMPFS_MAGIC:
+    case RAMFS_MAGIC:
+#ifdef OVERLAYFS_SUPER_MAGIC
+    case OVERLAYFS_SUPER_MAGIC:
+#endif
+        return true;
+    default:
+        return false;
+    }
+}
+
 static inline int nomount_hijack_superblock(struct super_block *sb)
 {
     struct nm_sop *nm_sop;
     int i, count = 0;
     if (unlikely(!sb || !sb->s_op)) return 0;
     if (__get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode)) return 0;
+    if (!nm_sb_supported(sb)) {
+        nm_debug("not hijacking a superblock of magic 0x%lx\n", sb->s_magic);
+        return -EOPNOTSUPP;
+    }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
     if (!sb->s_op->destroy_inode) {
@@ -3406,6 +4326,14 @@ static inline int nomount_hijack_superblock(struct super_block *sb)
      * unload frees the text it points at. See nm_pin_module(). */
     nm_pin_module();
     smp_store_release(&sb->s_op, &nm_sop->fake_sop);
+    /* After s_op: nm_encode_fh finds the original table through it. */
+    if (sb->s_export_op && sb->s_export_op->encode_fh) {
+        nm_sop->orig_export = sb->s_export_op;
+        nm_sop->fake_export = *sb->s_export_op;
+        nm_sop->fake_export.encode_fh = nm_encode_fh;
+        smp_store_release(&sb->s_export_op,
+                          (const struct export_operations *)&nm_sop->fake_export);
+    }
     nm_debug("Superblock successfully hijacked for dev: 0x%x\n", sb->s_dev);
     return 0;
 }
@@ -3495,6 +4423,7 @@ static void nm_dir_node_rcu_free(struct rcu_head *head)
     idr_for_each_entry(&dir_node->children_idr, child, id)
         kfree(child);
     idr_destroy(&dir_node->children_idr);
+    nm_rlist_free(dir_node->rlist);
     kmem_cache_free(nm_dir_cachep, dir_node);
 }
 
@@ -3584,6 +4513,8 @@ static void nomount_restore_superblocks(void)
         int i = 0;
         if (nm_sop->sb) {
             shrink_dcache_sb(nm_sop->sb);
+            if (nm_sop->orig_export)
+                smp_store_release(&nm_sop->sb->s_export_op, nm_sop->orig_export);
             smp_store_release(&nm_sop->sb->s_op, nm_sop->orig_sop);
             if (nm_sop->fake_xattr) {
                 smp_store_release((const struct xattr_handler ***)&nm_sop->sb->s_xattr, nm_sop->orig_xattr);
@@ -3619,6 +4550,11 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     hash_init(dir_node->children_ht);
     dir_node->real_eof = 0;
     dir_node->max_real_pos = 0;
+    dir_node->stock_eof = 0;
+    dir_node->max_stock_pos = 0;
+    dir_node->real_end = 0;
+    dir_node->stock_end = 0;
+    dir_node->rlist = NULL;
     dir_node->bloom_mask = 0;
     dir_node->has_public = false;
     atomic_set(&dir_node->refcount, 1);
@@ -3638,6 +4574,33 @@ static void nm_restamp_child_ino(struct nomount_dir_node *dir_node, struct nomou
         }
         id++;
     }
+}
+
+/* Widen a minted directory to unscoped, and every scoped minted directory above it: a
+ * wider directory under a narrower parent is still unreachable for the readers it gained.
+ * The store order only ever widens (deny, then the start, then the end), so a lockless
+ * reader never sees a narrower scope in between. */
+static bool nm_widen_scope_up(struct nomount_rule *rule)
+{
+    int guard = 64;
+    bool any = false;
+
+    while (rule && guard-- > 0 && (rule->flags & NM_FLAG_VIRTUAL_DIR)) {
+        struct nomount_dir_node *pd;
+
+        if (rule->target_uid || rule->uid_end || rule->deny_n) {
+            WRITE_ONCE(rule->deny_n, 0);
+            smp_wmb();
+            WRITE_ONCE(rule->target_uid, 0);
+            smp_wmb();
+            WRITE_ONCE(rule->uid_end, 0);
+            any = true;
+        }
+        pd = rule->parent_dir;
+        if (!pd || !(pd->_tag_ptr & 1UL)) break;
+        rule = (struct nomount_rule *)(pd->_tag_ptr & ~1UL);
+    }
+    return any;
 }
 
 static void nm_mark_public_up(struct nomount_rule *rule)
@@ -3817,6 +4780,7 @@ struct nm_dev_ino {
     char *seed;
     int dmax_err;
     bool dmax_valid;
+    bool e2big_retried;
     bool valid;
 };
 
@@ -3929,9 +4893,13 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
              * that failed once used to stay in the degraded path for the rest of the
              * boot. Still one-shot per call, so the expensive walk is not repeated per
              * rule; a slot that keeps failing simply keeps answering !dmax_valid. */
+            /* -E2BIG is deterministic for a given partition and is the expensive walk:
+             * retried once per slot, not on every range-cache miss. */
             if (!s->dmax_valid && seed &&
-                (s->dmax_err == -ENOMEM || s->dmax_err == -E2BIG ||
-                 s->dmax_err == -ENOENT)) {
+                (s->dmax_err == -ENOMEM || s->dmax_err == -ENOENT ||
+                 (s->dmax_err == -E2BIG && !s->e2big_retried))) {
+                if (s->dmax_err == -E2BIG)
+                    s->e2big_retried = true;
                 err = nm_dev_ino_seed(s, seed);
                 nm_debug("inoseed: retry dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu\n",
                          MAJOR(dev), MINOR(dev), seed, err,
@@ -3958,6 +4926,7 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
     s->dmax = 0;
     s->amax = 0;
     s->dmax_valid = false;
+    s->e2big_retried = false;
     err = nm_dev_ino_seed(s, seed);
     s->valid = true;
     /* The seed path is what the dmax/amax scan walked, and this table is 16 slots with
@@ -4704,17 +5673,16 @@ static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di, u64 local_max)
     return c;
 }
 
-/* A synthesized DIRECTORY is placed one above the highest number in play, with no attempt
- * to fit it between the stock entries beside it -- unlike nm_place_ino(), which searches
- * the gaps. That is deliberate (a directory inode colliding with a real one is worse than
- * a conspicuous one), but it is also exactly why `find <mount> -type d -inum +N` returns
- * precisely the directories this engine invented.
+/* A synthesized DIRECTORY takes a free number from inside the range its stock siblings
+ * occupy: the gap among its own siblings first (when di->used can prove it unused
+ * partition-wide), then the overlay's own counter for a contiguous overlay parent, then the
+ * directory band the seed scan measured. Only with none of those does it go above every
+ * number in play, which is what all of them did before v1.3.215: on an OP15 two dirs
+ * injected into /product came out at 89,750,657 and ...658 against a partition ceiling of
+ * 4,770,560, and `find -type d -inum +N` returned exactly the invented ones.
  *
- * Measured on an OP15: /product holds 106 entries topping out at ino 4,770,560, and the
- * two directories injected into it came out at 89,750,657 and ...658 -- nineteen times
- * the partition's own ceiling, so the high-water mark that produced them is NOT this
- * partition's. These lines say which of the four inputs it actually was; one boot with
- * NOMOUNT_DEBUG answers it.
+ * The `inoplace:` line names the branch that won and `inoseed:` the path that was scanned;
+ * one boot with NOMOUNT_DEBUG shows both.
  */
 static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
 {
@@ -4739,10 +5707,17 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
          * sibling+1MiB form rather than inventing a number from a same-type sample. */
         u64 above = 0;
 
+        /* Above the sampled stock maximum too, and past anything already taken: hw is
+         * only the high-water of numbers the ENGINE placed, so hw + 1 could be a stock
+         * sibling's inode. */
         if (di && di->hw)
             above = di->hw + 1;
-        else if (pop->hw)
+        if (pop->hw && pop->hw + 1 > above)
             above = pop->hw + 1;
+        if (pop->n && pop->v[pop->n - 1] + 1 > above)
+            above = pop->v[pop->n - 1] + 1;
+        while (above && nm_ino_taken(pop, above))
+            above++;
         nm_debug("inoplace: dev=%u:%u no dmax (di=%d err=%d ovl=%d) -> above=%llu (no gap-fit)\n",
                  MAJOR(pop->dev), MINOR(pop->dev), !!di, di ? di->dmax_err : 0,
                  NM_OVL_COMPILED, (unsigned long long)above);
@@ -5027,6 +6002,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     u16 anc_ctx_len = 0;
     bool have_anc = false;
     u8 anc_cap = 0;
+    struct nm_fa_sample anc_fa = { 0 };
     bool anc_ovl = false;
     u64 anc_dino = 0;
     struct nm_ino_pop *anc_dpop = NULL;
@@ -5051,7 +6027,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 /* Keep walking past a parent scoped to some other uid: a compatible rule
                  * may be further down the bucket, and which one came first was previously
                  * decided by hash order. */
-                if (ex->target_uid != 0 && ex->target_uid != target_rule->target_uid) {
+                if (!(ex->flags & NM_FLAG_VIRTUAL_DIR) &&
+                    ex->target_uid != 0 && ex->target_uid != target_rule->target_uid) {
                     uid_clash = ex;
                     continue;
                 }
@@ -5065,7 +6042,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     if (unlikely(!dir_node)) { err = -ENOMEM; break; }
                     dir_node->owner_rule = ex;
                     dir_node->_tag_ptr = (unsigned long)ex | 1UL;
-                    ex->this_dir = dir_node;
+                    /* ex is already in the hash: publish the node only once it is initialised. */
+                    smp_store_release(&ex->this_dir, dir_node);
                 }
                 if (!have_anc) {
                     anc_uid = ex->v_uid; anc_gid = ex->v_gid;
@@ -5083,6 +6061,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_ctx_len = ex->v_ctx_len;
                     if (ex->v_ctx_len) memcpy(anc_ctx, ex->v_ctx, ex->v_ctx_len + 1);
                     anc_cap = ex->v_cap;
+                    anc_fa = ex->v_fa;
                     have_anc = true;
                 }
                 err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
@@ -5100,19 +6079,34 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                  * __nomount_inject_child_locked does not consult it. */
                 if (target_rule->flags & NM_FLAG_PUBLIC)
                     nm_mark_public_up(ex);
+                /* A minted directory carries the scope of the rule that minted it. Reused
+                 * by a rule scoped differently, it becomes visible to everyone: the union
+                 * of two scopes is not a scope, and hiding the directory from one of the
+                 * rules' own readers would break that rule. */
+                if ((ex->flags & NM_FLAG_VIRTUAL_DIR) &&
+                    (ex->target_uid || ex->uid_end || ex->deny_n) &&
+                    (ex->target_uid != target_rule->target_uid ||
+                     ex->uid_end != target_rule->uid_end ||
+                     ex->deny_n != target_rule->deny_n ||
+                     memcmp(ex->deny_appid, target_rule->deny_appid,
+                            ex->deny_n * sizeof(ex->deny_appid[0])))) {
+                    if (nm_widen_scope_up(ex))
+                        atomic_inc(&nm_rule_gen);
+                }
                 found_virtual = true;
                 break;
             }
         }
 
         /* __nomount_add_rule refuses a second rule on a v_path another uid owns, but the
-         * intermediates minted below bypass that check and are always target_uid 0. Falling
+         * intermediates minted below bypass that check (they take the minting rule's scope
+         * and widen on reuse, see above). Falling
          * through here used to add one for a path an explicit uid-scoped rule already held,
          * leaving two rules on one v_path with a child slot each: a lookup resolved to
          * whichever the bucket yielded first and the other one's children went dark. */
         if (!found_virtual && !err && uid_clash) {
-            nm_warn("refusing to build '%.*s' for uid %u: uid %u already owns that directory\n",
-                    (int)parent_len, v_path, target_rule->target_uid, uid_clash->target_uid);
+            nm_debug("refusing to build '%.*s' for uid %u: uid %u already owns that directory\n",
+                     (int)parent_len, v_path, target_rule->target_uid, uid_clash->target_uid);
             err = -EEXIST;
         }
 
@@ -5156,7 +6150,13 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 if (nm_read_secctx(v_inode, anc_ctx, &anc_ctx_len) != 0)
                     anc_ctx_len = 0;
                 if (v_inode->i_op != &nm_file_iops && v_inode->i_op != &nm_dir_iops)
+                {
                     anc_cap = nm_stock_caps(v_inode);
+                    /* erofs directories take O_DIRECT (noop_direct_IO); overlay ones do not. */
+                    if (nm_stock_takes_odirect(&p_path))
+                        anc_cap |= NM_CAP_ODIRECT;
+                    nm_fa_sample_path(&p_path, &anc_fa);
+                }
 #ifdef OVERLAYFS_SUPER_MAGIC
                 anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
@@ -5182,11 +6182,15 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             if (unlikely(!dir_node)) {
                 err = -ENOMEM;
             } else {
-                err = nomount_hijack_virtual_parent(dir_node, v_inode);
+                err = nm_sb_supported(p_path.dentry->d_sb) ? 0 : -EOPNOTSUPP;
+                if (!err)
+                    err = nomount_hijack_virtual_parent(dir_node, v_inode);
                 if (!err)
                     err = nomount_hijack_dir_inode(dir_node, v_inode);
                 if (!err)
                     err = nomount_hijack_superblock(p_path.dentry->d_sb);
+                if (!err)
+                    nm_rlist_prime(dir_node, &p_path, v_inode);
                 if (likely(!err)) {
 
                     qname.name = child_name;
@@ -5228,7 +6232,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         irule->flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR |
                        (target_rule->flags & NM_FLAG_PUBLIC);
         irule->v_ino = (unsigned long)h_parent;
-        irule->target_uid = 0;
+        /* The scope of the rule it is minted for: an unscoped intermediate showed a
+         * scoped-out app an empty directory that does not exist on stock. */
+        irule->target_uid = target_rule->target_uid;
+        irule->uid_end = target_rule->uid_end;
+        irule->deny_n = target_rule->deny_n;
+        memcpy(irule->deny_appid, target_rule->deny_appid, sizeof(irule->deny_appid));
         irule->v_uid = GLOBAL_ROOT_UID;
         irule->v_gid = GLOBAL_ROOT_GID;
         irule->v_mode = 0755;
@@ -5272,6 +6281,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_ctx_len = anc_ctx_len;
                 if (anc_ctx_len) memcpy(irule->v_ctx, anc_ctx, anc_ctx_len + 1);
                 irule->v_cap = anc_cap;
+                irule->v_fa = anc_fa;
                 if (!anc_dpop)
                     anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
                 irule->v_ino = anc_dpop ?
@@ -5279,8 +6289,21 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 if (!irule->v_ino && anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
                 if (anc_ovl) {
+                    /* Into the exclusion set at the mint, not only when a slot is seeded:
+                     * ancestors are usually minted after their device slot exists. */
+                    struct nm_dev_ino *odi = anc_dpop ? nm_dev_ino_get(anc_dpop->dev, NULL) : NULL;
+                    u64 dn = ((u64)irule->v_hash & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
+                    int guard = 256;
+
+                    while (odi && odi->used && nm_used_test(odi->used, dn) && guard-- > 0) {
+                        dn += 2;
+                        if (dn > 0x03FFFFFFULL)
+                            dn = 0x02000001ULL;
+                    }
+                    if (odi && odi->used)
+                        nm_used_add(odi->used, dn);
                     irule->flags |= NM_FLAG_OVL_INO;
-                    irule->v_dino = ((u64)irule->v_hash & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
+                    irule->v_dino = dn;
                 } else {
                     irule->v_dino = (u64)irule->v_ino;
                 }
@@ -5437,6 +6460,38 @@ static u64 nm_child_dotdot_of(const char *dirpath)
     return out;
 }
 
+/* Both answers a stock inode gives: GETFLAGS asks with flags_valid, FSGETXATTR with
+ * fsx_valid, and overlayfs's security check differs between them. Called straight
+ * through i_op so the LKM imports nothing new. */
+static void nm_fa_sample_path(const struct path *p, struct nm_fa_sample *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->err[0] = s->err[1] = -ENOIOCTLCMD;
+#ifdef NM_HAVE_FILEATTR
+    {
+        struct inode *ino = p && p->dentry ? d_backing_inode(p->dentry) : NULL;
+        int k;
+
+        if (ino && ino->i_op && ino->i_op->fileattr_get &&
+            ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops) {
+            for (k = 0; k < 2; k++) {
+                memset(&s->fa[k], 0, sizeof(s->fa[k]));
+                if (k)
+                    s->fa[k].fsx_valid = true;
+                else
+                    s->fa[k].flags_valid = true;
+                s->err[k] = ino->i_op->fileattr_get(p->dentry, &s->fa[k]);
+            }
+        }
+    }
+#endif
+    s->known = true;
+}
+
+/* The fileattr answer of the sibling nm_scan_dir_for_file() last picked. Under
+ * nomount_write_mutex, like the sibling cache it travels with. */
+static struct nm_fa_sample nm_sib_fa;
+
 static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                                 char *octx, u16 *octxlen, dev_t *omapdev, u8 *ocap, int depth)
 {
@@ -5489,6 +6544,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                 u16 fctxlen = 0;
                 dev_t fmapdev = 0;
                 u8 fcap = 0;
+                struct nm_fa_sample ffa = { 0 };
 
                 if (!ci || ci->i_op == &nm_file_iops || ci->i_op == &nm_dir_iops)
                     r = -EINVAL;
@@ -5500,6 +6556,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                     fcap = nm_stock_caps(d_backing_inode(fp.dentry));
                     if (nm_stock_takes_odirect(&fp))
                         fcap |= NM_CAP_ODIRECT;
+                    nm_fa_sample_path(&fp, &ffa);
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
@@ -5512,6 +6569,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                     }
                     if (omapdev) *omapdev = fmapdev;
                     if (ocap) *ocap = fcap;
+                    nm_sib_fa = ffa;
                     kfree(cp); ret = 0; goto done;
                 }
             }
@@ -5541,6 +6599,19 @@ static u16 nm_sib_cache_ctxlen;
 static dev_t nm_sib_cache_mapdev;
 static u8 nm_sib_cache_cap;
 static bool nm_sib_cache_valid;
+static struct nm_fa_sample nm_sib_cache_fa;
+
+/* Called under nomount_write_mutex when a hijacked superblock goes away. */
+static void nm_forget_dev_caches(dev_t dev)
+{
+    int i;
+
+    nm_sib_cache_valid = false;
+    nm_range_cache_flush();
+    for (i = 0; i < NM_DEV_INO_SLOTS; i++)
+        if (nm_dev_ino_tab[i].valid && nm_dev_ino_tab[i].dev == dev)
+            nm_dev_ino_tab[i].valid = false;
+}
 
 static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
                                 char *octx, u16 *octxlen, dev_t *omapdev, u8 *ocap)
@@ -5563,6 +6634,7 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
         }
         if (omapdev) *omapdev = nm_sib_cache_mapdev;
         if (ocap) *ocap = nm_sib_cache_cap;
+        nm_sib_fa = nm_sib_cache_fa;
         kfree(path);
         return 0;
     }
@@ -5587,6 +6659,7 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
             if (nm_sib_cache_ctxlen) memcpy(nm_sib_cache_ctx, octx, nm_sib_cache_ctxlen + 1);
             nm_sib_cache_mapdev = omapdev ? *omapdev : 0;
             nm_sib_cache_cap = ocap ? *ocap : 0;
+            nm_sib_cache_fa = nm_sib_fa;
             nm_sib_cache_valid = true;
         }
     }
@@ -5615,6 +6688,42 @@ static size_t nm_norm_vpath(char *dst, const char *src, size_t len)
     }
     dst[o] = '\0';
     return o;
+}
+
+/* For a directory rule: the stock regular file its file children mirror. The sibling scan
+ * starts in the directory itself (a stock one, when the rule shadows it) and walks up. */
+static void nm_sample_child_file(struct nomount_rule *rule)
+{
+    char *probe = kasprintf(GFP_KERNEL, "%s/.", nm_get_vpath(rule));
+    char *ctx = kmalloc(NM_CTX_MAX, GFP_KERNEL);
+    struct kstat k;
+    u16 ctxlen = 0;
+    dev_t mapdev = 0;
+    u8 cap = 0;
+
+    /* Real buffers, not NULLs: the scan caches its answer for this directory, and a later
+     * file rule here reads label and map dev back out of that cache. */
+    if (!probe || !ctx) {
+        kfree(probe);
+        kfree(ctx);
+        return;
+    }
+    if (nm_find_sibling_meta(probe, &k, ctx, &ctxlen, &mapdev, &cap) == 0) {
+        rule->v_cfile.cap = cap;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        rule->v_cfile.result_mask = k.result_mask;
+        rule->v_cfile.attributes = k.attributes;
+        rule->v_cfile.attr_mask = k.attributes_mask;
+#ifdef STATX_DIOALIGN
+        rule->v_cfile.dio_mem = k.dio_mem_align;
+        rule->v_cfile.dio_off = k.dio_offset_align;
+#endif
+#endif
+        rule->v_cfile.fa = nm_sib_fa;
+        rule->v_cfile.known = true;
+    }
+    kfree(probe);
+    kfree(ctx);
 }
 
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, const struct nm_uid_scope *scope)
@@ -5710,10 +6819,19 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         }
         {
             struct inode *si = d_backing_inode(v_path_struct.dentry);
-            if (si && si->i_op != &nm_file_iops && si->i_op != &nm_dir_iops)
+            if (si && si->i_op != &nm_file_iops && si->i_op != &nm_dir_iops) {
                 rule->s_path = v_path_struct;
-            else
+            } else {
+                /* A live rule already covers the path (a re-add, or under an engine dir):
+                 * the stock file is the one that inode stands in for. */
+                struct nm_inode_info *ei = si ? si->i_private : NULL;
+
+                if (ei && ei->s_path.dentry) {
+                    rule->s_path = ei->s_path;
+                    path_get(&rule->s_path);
+                }
                 path_put(&v_path_struct);
+            }
         }
     } else {
         struct kstat sib;
@@ -5740,6 +6858,40 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_attributes = sib.attributes;
             rule->v_attr_mask  = sib.attributes_mask;
 #endif
+            rule->v_fa = nm_sib_fa;
+            /* A directory answers like a stock directory: sample its nearest real ancestor. */
+            if (rule->flags & NM_FLAG_IS_DIR) {
+                char *anc = kstrdup(nm_get_vpath(rule), GFP_KERNEL);
+                char *sl;
+                struct path ap;
+
+                while (anc && (sl = strrchr(anc, '/')) && sl != anc) {
+                    *sl = '\0';
+                    if (kern_path(anc, LOOKUP_FOLLOW, &ap) == 0) {
+                        nm_fa_sample_path(&ap, &rule->v_fa);
+                        path_put(&ap);
+                        break;
+                    }
+                }
+                kfree(anc);
+            }
+            /* A module file left at root:root takes its stock sibling's GROUP -- a binary in
+             * /system/bin is root:shell there -- and only where that changes no access: the
+             * engine inode's owner is the only DAC check opens get, so the uid never moves,
+             * nor anything with set-id bits, nor a mode whose group and other bits differ. */
+            {
+                struct inode *mi = rule->r_path.dentry ? d_backing_inode(rule->r_path.dentry) : NULL;
+                umode_t m = mi ? mi->i_mode : 0;
+
+                if (mi && S_ISREG(m) && uid_eq(mi->i_uid, GLOBAL_ROOT_UID) &&
+                    gid_eq(mi->i_gid, GLOBAL_ROOT_GID) && uid_eq(sib.uid, GLOBAL_ROOT_UID) &&
+                    !(m & (S_ISUID | S_ISGID)) && ((m >> 3) & 7) == (m & 7)) {
+                    rule->v_uid = GLOBAL_ROOT_UID;
+                    rule->v_gid = sib.gid;
+                    rule->v_mode = m & 07777;
+                    rule->flags |= NM_FLAG_HAVE_VOWN;
+                }
+            }
             {
                 u64 uniq = rule->r_path.dentry
                          ? (u64)d_backing_inode(rule->r_path.dentry)->i_ino
@@ -5806,6 +6958,9 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             }
         }
     }
+
+    if ((rule->flags & NM_FLAG_IS_DIR) && !(rule->flags & NM_FLAG_VIRTUAL_DIR))
+        nm_sample_child_file(rule);
 
     return rule;
 }
@@ -5922,8 +7077,8 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     int err = 0;
 
     if (unlikely(nm_target_too_shallow(v_path, v_len))) {
-        nm_warn("refusing rule on '%.*s': fewer than two path components would mask a whole partition\n",
-                (int)v_len, v_path);
+        nm_debug("refusing rule on '%.*s': fewer than two path components would mask a whole partition\n",
+                 (int)v_len, v_path);
         return -EINVAL;
     }
 
@@ -5939,8 +7094,8 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         if (existing->v_hash == rule->v_hash && existing->v_len == rule->v_len &&
             !nm_scope_eq(existing, scope) &&
             memcmp(nm_get_vpath(existing), nm_get_vpath(rule), rule->v_len) == 0) {
-            nm_warn("refusing rule on '%.*s' for uid %u: uid %u already owns this path\n",
-                    (int)rule->v_len, nm_get_vpath(rule), scope->uid, existing->target_uid);
+            nm_debug("refusing rule on '%.*s' for uid %u: uid %u already owns this path\n",
+                     (int)rule->v_len, nm_get_vpath(rule), scope->uid, existing->target_uid);
             mutex_unlock(&nomount_write_mutex);
             nm_free_rule(rule);
             return -EEXIST;
@@ -5961,6 +7116,10 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
                           (existing->flags & NM_FLAG_SHADOWS_STOCK);
             if (!rule->v_cap)
                 rule->v_cap = existing->v_cap;
+            if (!rule->s_path.dentry && existing->s_path.dentry) {
+                rule->s_path = existing->s_path;
+                path_get(&rule->s_path);
+            }
             hash_del_rcu(&existing->vpath_node);
             victim = existing;
             nm_debug("Shadowing existing rule for: %s\n", nm_get_vpath(rule));
@@ -6091,6 +7250,13 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
 
             v_ptr = data + pos; pos += vp_len;
             r_ptr = data + pos;  pos += rp_len;
+            /* An embedded NUL keys the rule on bytes kern_path never sees: listed under one
+             * name, deletable by none. The attribute path strnlen()s for the same reason. */
+            if (memchr(v_ptr, 0, vp_len) || (rp_len && memchr(r_ptr, 0, rp_len))) {
+                nfail++;
+                if (!first_err) first_err = -EINVAL;
+                continue;
+            }
             {
                 /* The batch payload carries no scope fields and keeps its
                  * layout, so a batch entry is always legacy-shaped. Ranges go
@@ -6100,7 +7266,7 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
                 err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, &scope, &a_victims);
             }
             if (err) {
-                nm_err("Failed to inject rule batch entry (err: %d)\n", err);
+                nm_debug("rule batch entry refused (err: %d)\n", err);
                 nfail++;
                 if (!first_err) first_err = err;
             }
@@ -6111,8 +7277,8 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
                 nm_free_rule(v_rule);
         }
         if (first_err)
-            nm_warn("rule batch: %d entr%s rejected (first err %d)\n",
-                    nfail, nfail == 1 ? "y" : "ies", first_err);
+            nm_debug("rule batch: %d entr%s rejected (first err %d)\n",
+                     nfail, nfail == 1 ? "y" : "ies", first_err);
         return first_err;
 
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && attrs[NOMOUNT_ATTR_REAL_PATH]) {
@@ -6164,6 +7330,11 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
             if (pos + vp_len > len) {
                 if (!first_err) first_err = -EINVAL;
                 break;
+            }
+            if (memchr(data + pos, 0, vp_len)) {
+                if (!first_err) first_err = -EINVAL;
+                pos += vp_len;
+                continue;
             }
             {
                 struct nm_uid_scope scope = { .uid = target_uid };
@@ -6634,6 +7805,26 @@ bool nm_inode_hidden_from_caller(const struct inode *inode)
     if (inode->i_op != &nm_file_iops && inode->i_op != &nm_dir_iops)
         return false;
     return nm_hidden_from_caller(inode->i_private);
+}
+
+/* The fs/ioctl.c FIONREAD hook (hookless/patches/nomount_fionread_*.patch). FIONREAD answers
+ * i_size straight off the file's inode, before any of our ops run, and an engine inode is
+ * shared by callers served different files: a hidden app reading the stock 56-byte hosts
+ * through it was told the module's 2 MB. This is the size of the file this open actually
+ * reads. kernel_read_file() is untouched, so .ko and firmware loads keep the module size. */
+loff_t nm_fionread_isize(struct file *filp, struct inode *inode);
+loff_t nm_fionread_isize(struct file *filp, struct inode *inode)
+{
+    struct file *real;
+
+    if (unlikely(!inode))
+        return 0;
+    if (!filp || inode->i_op != &nm_file_iops)
+        return i_size_read(inode);
+    real = READ_ONCE(filp->private_data);
+    if (!real || !file_inode(real))
+        return i_size_read(inode);
+    return i_size_read(file_inode(real));
 }
 
 static void __exit nomount_exit(void)

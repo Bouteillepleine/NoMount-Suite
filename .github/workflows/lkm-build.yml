@@ -54,7 +54,7 @@ jobs:
           - { ver: '6.1',  kref: 'android14-6.1',                  tc: clang }
           - { ver: '6.6',  kref: 'android15-6.6',                  tc: clang }
           - { ver: '6.12', kref: 'android16-6.12',                 tc: clang }
-          - { ver: '6.18', kref: 'linux-6.18.y',                   tc: clang }
+          - { ver: '6.18', kref: 'android17-6.18',                 tc: clang }
     steps:
       - name: Should this version run?
         id: sel
@@ -108,11 +108,7 @@ jobs:
         if: steps.sel.outputs.run == '1'
         run: |
           set -euo pipefail
-          if [ "${{ matrix.ver }}" = "6.18" ]; then
-            REMOTE=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
-          else
-            REMOTE=https://android.googlesource.com/kernel/common
-          fi
+          REMOTE=https://android.googlesource.com/kernel/common
           SHA=$(git ls-remote "$REMOTE" "refs/heads/${{ matrix.kref }}" | cut -f1)
           [ -n "$SHA" ] || {
             echo "::error::git ls-remote found no refs/heads/${{ matrix.kref }} at $REMOTE -"
@@ -302,8 +298,13 @@ jobs:
           [ -n "$NM" ] || { echo "::error::no nm on this runner"; exit 1; }
 
           "$NM" -u "$KO" | awk 'NF {print $NF}' | sort -u > /tmp/undef.txt
-          grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
-            --include='*.c' --include='*.h' 2>/dev/null \
+          # arm64 and the arch-independent tree only: an export that exists under arch/x86, in
+          # tools/ or in samples/ satisfies nothing on this kernel. Drivers the defconfig never
+          # builds still count; Module.symvers from the DDK build stays the authority.
+          exp_re='\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*'
+          { grep -rhoE "$exp_re" ksrc --exclude-dir=arch --exclude-dir=tools --exclude-dir=samples \
+              --exclude-dir=Documentation --include='*.c' --include='*.h' 2>/dev/null || true
+            grep -rhoE "$exp_re" ksrc/arch/arm64 --include='*.c' --include='*.h' 2>/dev/null || true; } \
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
           # arm64 exports its out-of-line LL/SC atomics through __LL_SC_EXPORT(x),
           # which pastes its argument: the source reads __LL_SC_EXPORT(atomic_##op),

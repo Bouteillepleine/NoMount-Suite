@@ -54,6 +54,7 @@
 #include <linux/uidgid.h>
 #include <linux/user_namespace.h>
 #include <linux/dcache.h>
+#include <linux/mount.h>
 
 #include "ghost.h"
 #include "nm_engine.h"
@@ -116,6 +117,13 @@ static bool nm_gp_owner_concealed(const struct path *path)
 
 struct nm_gp_ctx {
 	bool hide;
+};
+
+/* do_filp_open's own: it also needs the open flags and whether the caller is hidden. */
+struct nm_gp_open_ctx {
+	bool blocked;
+	bool hide;
+	int oflags;
 };
 
 /* The socket probe needs one more field than the others and is a COLD probe, so it gets
@@ -389,14 +397,19 @@ static int nm_gp_prio_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  */
 static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct nm_gp_open_ctx *ctx = (struct nm_gp_open_ctx *)ri->data;
 	const char * const *fname = (const char * const *)regs->regs[1];
+	/* struct open_flags starts with int open_flag on every kernel this builds for. */
+	const int *op = (const int *)regs->regs[2];
 
+	ctx->blocked = false;
 	ctx->hide = false;
+	ctx->oflags = op ? *op : 0;
 	if (!fname)
 		return 0;
 	if (!nm_uid_blocked(from_kuid(&init_user_ns, current_uid())))
 		return 0;
+	ctx->blocked = true;
 
 	/* ghost_hidden_name(), not ghost_name_ignorable(). The bare class check made
 	 * every path carrying an ignorable code point read as -ENOENT for a hide-listed
@@ -411,50 +424,82 @@ static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
-/* An argument-shaped failure, i.e. one the caller would have got whatever path it named.
+/* A failure an absent name gets too, so passing it through tells nothing.
  *
- * Rewriting these to -ENOENT is itself the tell: an app that passes a bad flag, an
- * over-long name or a symlink loop gets "no such file" from us where every other path on
- * the device answers EINVAL, ENAMETOOLONG or ELOOP. The errnos NOT listed here are the
- * ones that only arise when the path EXISTS -- EACCES, EPERM, EROFS, EISDIR, ENOTDIR --
- * and leaving those alone would be the opposite leak, so they still become ENOENT.
+ * Rewriting these to -ENOENT is itself the tell: an over-long name or an exhausted fd
+ * table answers the same whatever path it named. ELOOP, EINVAL, EOPNOTSUPP, EOVERFLOW and
+ * the signal returns come from the object found (a hidden symlink under O_NOFOLLOW, a file
+ * without DIO), so they are rewritten. EACCES and EROFS arise for an ABSENT name with
+ * O_CREAT too (a read-only mount, an unwritable parent), so nm_gp_open_ret passes them
+ * through there and rewrites them otherwise.
  */
 static bool nm_gp_errno_is_about_the_call(long err)
 {
 	switch (err) {
-	case -EINVAL:
 	case -ENAMETOOLONG:
-	case -ELOOP:
 	case -EFAULT:
 	case -EMFILE:
 	case -ENFILE:
 	case -ENOMEM:
-	case -EINTR:
-	case -ERESTARTSYS:
-	case -EOPNOTSUPP:
-	case -EOVERFLOW:
 		return true;
 	default:
 		return false;
 	}
 }
 
+static bool nm_gp_file_ro(const struct file *f)
+{
+	const struct super_block *sb = f->f_path.dentry->d_sb;
+
+#ifdef SB_RDONLY
+	if (sb->s_flags & SB_RDONLY)
+		return true;
+#else
+	if (sb->s_flags & MS_RDONLY)
+		return true;
+#endif
+	return f->f_path.mnt->mnt_flags & MNT_READONLY;
+}
+
+/* What stock answers for an absent name: ENOENT, or EROFS when O_CREAT met a read-only
+ * mount. A flat ENOENT for O_CREAT was the tell, since mkdir of the same name and
+ * O_CREAT of any sibling answer EROFS there. */
 static int nm_gp_open_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct nm_gp_open_ctx *ctx = (struct nm_gp_open_ctx *)ri->data;
 	struct file *file;
+	long err = -ENOENT;
 
-	if (!ctx->hide)
+	if (!ctx->blocked)
 		return 0;
 
 	file = (struct file *)regs->regs[0];
-	if (IS_ERR(file) && nm_gp_errno_is_about_the_call(PTR_ERR(file)))
+	if (IS_ERR(file)) {
+		if (!ctx->hide)
+			return 0;
+		if (nm_gp_errno_is_about_the_call(PTR_ERR(file)))
+			return 0;
+		if ((ctx->oflags & O_CREAT) &&
+		    (PTR_ERR(file) == -EROFS || PTR_ERR(file) == -EACCES))
+			return 0;
+		regs->regs[0] = (unsigned long)ERR_PTR(-ENOENT);
 		return 0;
-
-	if (!IS_ERR_OR_NULL(file))
-		fput(file);
-
-	regs->regs[0] = (unsigned long)ERR_PTR(-ENOENT);
+	}
+	if (!file)
+		return 0;
+	/* The string matched no rule, but `//`, `/./` or a symlinked prefix still names
+	 * one: ask about the file that actually opened. */
+	if (!ctx->hide && !ghost_hidden_path(&file->f_path))
+		return 0;
+#ifdef FMODE_CREATED
+	/* The caller made it just now, in a place it could write: not ours to deny. */
+	if (file->f_mode & FMODE_CREATED)
+		return 0;
+#endif
+	if ((ctx->oflags & O_CREAT) && nm_gp_file_ro(file))
+		err = -EROFS;
+	fput(file);
+	regs->regs[0] = (unsigned long)ERR_PTR(err);
 	return 0;
 }
 
@@ -483,7 +528,7 @@ static struct kretprobe nm_gp_krp[] = {
 		.kp.symbol_name = "do_filp_open",
 		.entry_handler  = nm_gp_open_entry,
 		.handler        = nm_gp_open_ret,
-		.data_size      = sizeof(struct nm_gp_ctx),
+		.data_size      = sizeof(struct nm_gp_open_ctx),
 		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{

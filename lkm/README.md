@@ -129,7 +129,7 @@ maintained as vmas come and go, so the read path is O(1). The second is cheaper
 to run and much easier to get subtly wrong - a count that drifts produces
 impossible values, which the in-tree `pathhide.c` comments at length about
 avoiding. Until one exists, an LKM user's `VmSize` still counts what their
-`maps` does not, and the module says so on load.
+`maps` does not, and a `hide=0` build says so on load.
 
 **Readers that still disagree.** Hiding the maps line without hiding
 `map_files` was measured on CPH2745 to produce exactly the contradiction the
@@ -154,6 +154,18 @@ Two symbols `pathhide.c` reaches for are absent from some trimmed KMIs:
 Both are exported by stock 6.12.69 and both have `EXPORT_SYMBOL` in the kernel
 source, so the compile gate passes; a device whose OEM trimmed them would need
 a kallsyms redirect.
+
+**4. FIONREAD can still report the module file's size.** `ioctl(fd, FIONREAD)`
+answers `i_size` off the file's inode before any file operation runs, and an
+engine inode is shared by every caller. A caller the rule hides it from reads
+the stock file through that inode, so FIONREAD gives it the module file's size:
+a hidden app saw `/system/etc/hosts` as 56 bytes by `fstat` and `read`, and
+2,033,224 by FIONREAD. The in-tree build answers FIONREAD through
+`nm_fionread_isize()` from a hook in `fs/ioctl.c`. This variant has nowhere to
+hook: on the OP15 6.12.69 build `do_vfs_ioctl()` is inlined into
+`__arm64_sys_ioctl` and has no symbol, and a probe on the syscall would have to
+rewrite the value after it was copied to user memory. It shows only to a caller
+hidden from a rule, on a file whose module copy differs in size from stock.
 
 ## When it is still the right choice
 
@@ -207,23 +219,26 @@ documents.
 out-of-tree module requires a matching vermagic, and with `CONFIG_MODVERSIONS`
 matching symbol CRCs too, and a GKI `.ko` built for `android16-6.12` will
 refuse a 6.12 kernel from a different point release - correctly. That is what
-`module/bin/ko-loader-arm64` is for, and it defeats BOTH gates: it rewrites
-vermagic to whatever the kernel asks for, and it pre-resolves the module's
-undefined symbols out of `/proc/kallsyms`, writing each address in as `SHN_ABS`.
-`simplify_symbols()` only version-checks `SHN_UNDEF` symbols, so a pre-resolved
-one never reaches `check_version()` - `CONFIG_MODVERSIONS` is bypassed rather
-than satisfied. That is sound only while "same KMI => same struct layout" holds,
-which is the GKI contract and the reason `module/lkm-load.sh` refuses to use
-ko-loader for a module whose KMI it had to guess. To see what you have:
+`module/bin/ko-loader-arm64` is for. It rewrites vermagic to whatever the kernel
+asks for and pre-resolves the module's undefined symbols out of `/proc/kallsyms`,
+writing each address in as `SHN_ABS`. `simplify_symbols()` only version-checks
+`SHN_UNDEF` symbols, so those per-symbol CRCs are never compared. `ksud insmod`
+does the same two things. Two checks still run first and stay in force: the
+`module_layout` CRC from the module's own `__versions` section, and on 6.6+ the
+size of `struct module`. Past those, loading is a bet on "same KMI => same
+struct layout", the GKI contract, which is why `module/lkm-load.sh` uses neither
+ko-loader nor `ksud insmod` for a module whose KMI it had to guess. CI fails any
+module that comes out of a MODVERSIONS build with an empty `__versions`. To see what you have:
 
 ```
 cat /proc/version      # on the phone
 modinfo nomount-<kmi>.ko | grep vermagic
 ```
 
-If those disagree and ko-loader did not reconcile them, `insmod` fails with
-*"version magic ... should be ..."* - the module declining to enter a kernel
-whose struct layouts it does not share.
+If those disagree and ko-loader did not reconcile them, `insmod` refuses the module.
+On a `CONFIG_MODVERSIONS` kernel the refusal is about symbol CRCs (*"disagrees about
+version of symbol ..."*), not the release string, which those kernels do not compare -
+the module declining to enter a kernel whose struct layouts it does not share.
 
 ### Testing the pathhide guards on a device
 
@@ -234,6 +249,7 @@ a device with the module loaded and a kernel that has no NoMount built in:
 ```
 clang --target=aarch64-linux-android31 -O2 -static tests/pathhide-probe.c -o pathhide-probe
 adb push pathhide-probe /data/local/tmp/
+adb push tests/lkm-pathhide.sh /data/local/tmp/
 adb shell su -c 'sh /data/local/tmp/lkm-pathhide.sh /data/local/tmp/pathhide-probe'
 ```
 

@@ -5,6 +5,7 @@
 
 ```sh
 patch -p1 < patches/nomount_kernel_integration.patch   # from the kernel tree root
+patch -p1 < patches/nomount_fionread_do_vfs_ioctl.patch  # 5.10-6.18; 4.9-5.4: nomount_fionread_file_ioctl.patch
 cp src/nomount.c src/nomount.h fs/
 ```
 
@@ -21,14 +22,14 @@ make -C lkm NM_DEBUG=1                    # out-of-tree (same switch, via the Ma
 ```
 
 What it is for right now are the `inoseed:` and `inoplace:` lines around
-synthesized inode placement. A directory the engine creates is numbered one
-above the highest value in play and is never fitted into the gaps between the
-stock entries beside it, so a range query returns exactly the directories the
-engine invented. On an OP15 the two injected into `/product` came out at
-89,750,657 and 89,750,658 while that partition's own ceiling is 4,770,560
-across all 106 entries -- so the mark being used is not that partition's.
-`inoplace:` names which of `dmax`/`amax`/`di->hw`/`pop->hw` won, and `inoseed:`
-names the path whose subtree was scanned to seed it:
+synthesized inode placement. Since v1.3.215 a directory the engine creates
+takes a free number from inside the range its stock siblings occupy: the gap
+among its own siblings first, then the overlay's counter when the parent is an
+overlay, then the device's in-band range. Before that it was numbered above
+every value in play, so a range query returned exactly the directories the
+engine invented (on an OP15, 89,750,657 against a partition ceiling of
+4,770,560). `inoplace:` names which input won, and `inoseed:` names the path
+whose subtree was scanned to seed it:
 
 ```sh
 dmesg | grep -E 'NoMount.*ino(seed|place)'
@@ -39,18 +40,26 @@ off outside an investigation.
 
 One patch covers 4.9 through 6.18. Its own header explains why the anchors are
 where they are, and `.github/workflows/hookless-matrix.yml` applies it to
-all ten trees on every push and asserts each hunk lands inside the function it
+all ten trees on every push that touches `hookless/` and asserts each hunk lands inside the function it
 is meant for. Read the matrix run rather than hand-checking the result.
 
 ## What the patch covers, and what it does not
 
-Four hunks, and that is the whole of it:
+Four hunks, plus the FIONREAD hook that ships as its own patch:
 
 | hunk | what it buys |
 | :--- | :--- |
 | `fs/Kconfig`, `fs/Makefile` | `CONFIG_NOMOUNT` and the object |
 | `fs/proc/task_mmu.c` | `vfs_map_meta_override()` in `show_map_vma()`, so an injected file reports the stock dev/ino in `/proc/<pid>/maps` |
 | `fs/xattr.c` | `nm_inode_hidden_from_caller()` in `vfs_getxattr()`, so a caller denied `open()` is also denied `security.selinux` |
+| `fs/ioctl.c` | `nm_fionread_isize()` in `case FIONREAD`, so a caller served the stock file is told the stock size, not the module file's |
+
+The FIONREAD hook is two variant patches because the case moved: `file_ioctl()`
+on 4.9-5.4, `do_vfs_ioctl()` on 5.10-6.18. Exactly one applies to any tree at
+`--fuzz=0`; the compile matrix fails if that stops being true, or if the hook
+lands outside `case FIONREAD`. It is separate from the integration patch so the
+builders can pick the variant by trying both, and so an engine ref that predates
+it still pairs with any `kernel_patches`.
 
 **The cloaks are not in this directory.** `_ghost` (the existence cloak: the
 `stat`, `access`, `open`, abstract-socket and `getpriority` guards) and
@@ -69,8 +78,8 @@ live in the kernel forks, not here:
 
 So a kernel built from this directory alone gets path redirection, the maps
 dev/ino rewrite and the xattr guard — and none of the existence or maps cloaks.
-`nomount check` will report the cloaks as unavailable, which is correct and not
-a fault in the build.
+`nomount check` names each missing cloak in a note, which is correct and not a
+fault in the build.
 
 That build also has to link, and with engines up to v1.3.213 it did not on
 arm64: the engine referred to the cloaks' control functions as weak undefined symbols, the address
@@ -126,5 +135,8 @@ sitting, or the LKM and in-tree builds answer the same oracle differently.
 
 ## Checking a built kernel
 
-`nm-verify.sh` reads a kernel tree or an `Image` and reports whether the engine
-is in it and at which version.
+`nm-verify.sh` is an on-device regression test, not a kernel-tree check. It
+drives the installed `nm` on a rooted device and tests two behaviours: a file
+rule replaced by a directory rule refreshes `d_type` and `nlink` (A1), and a rule
+naming a source that does not exist is refused to the caller (A3). CI only
+shellchecks it.

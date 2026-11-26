@@ -178,11 +178,17 @@ static bool ghost_uid_hidden(u32 uid)
  */
 bool ghost_uid_task_hidden(u32 uid)
 {
+	u32 caller;
+
 	if (!READ_ONCE(ghost_ncuids))
 		return false;
 	if (!ghost_uid_concealed(uid))
 		return false;
-	return ghost_uid_hidden(from_kuid(&init_user_ns, current_uid()));
+	caller = from_kuid(&init_user_ns, current_uid());
+	/* The caller's own app always owns a task, so concealing it is the tell. */
+	if (ghost_appid(uid) == ghost_appid(caller))
+		return false;
+	return ghost_uid_hidden(caller);
 }
 
 static struct hlist_head *ghost_bucket(u32 hash)

@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
 #include <linux/atomic.h>
+#include <linux/version.h>
 
 #include "nm_hide.h"
 #include "nm_maps_spoof.h"
@@ -65,6 +66,10 @@ struct nm_maps_slot {
 
 static struct nm_maps_slot nm_maps_slots[NM_MAPS_SLOTS];
 static DEFINE_SPINLOCK(nm_maps_lock);
+/* Occupied slots. forget() and take() run for every VMA of every maps read; with no note
+ * pending, which is almost always, they return before scanning 512 slots with irqs off.
+ * A reader only ever takes its own note, stored earlier in the same read. */
+static atomic_t nm_maps_live = ATOMIC_INIT(0);
 
 /* Table pressure, reported once.
  *
@@ -104,10 +109,13 @@ static void nm_maps_forget(const void *m)
 	unsigned long flags;
 	int i;
 
+	if (!atomic_read(&nm_maps_live))
+		return;
 	spin_lock_irqsave(&nm_maps_lock, flags);
 	for (i = 0; i < NM_MAPS_SLOTS; i++) {
 		if (nm_maps_slots[i].m == m) {
 			nm_maps_slots[i].m = NULL;
+			atomic_dec(&nm_maps_live);
 			break;
 		}
 	}
@@ -151,6 +159,8 @@ static void nm_maps_note(const void *m, dev_t dev, unsigned long ino)
 			atomic_inc(&nm_maps_steals);
 	}
 	if (free >= 0) {
+		if (!nm_maps_slots[free].m)
+			atomic_inc(&nm_maps_live);
 		nm_maps_slots[free].m = m;
 		nm_maps_slots[free].stamp = now;
 		nm_maps_slots[free].dev = dev;
@@ -171,12 +181,15 @@ static bool nm_maps_take(const void *m, dev_t *dev, unsigned long *ino)
 	bool got = false;
 	int i;
 
+	if (!atomic_read(&nm_maps_live))
+		return false;
 	spin_lock_irqsave(&nm_maps_lock, flags);
 	for (i = 0; i < NM_MAPS_SLOTS; i++) {
 		if (nm_maps_slots[i].m == m) {
 			*dev = nm_maps_slots[i].dev;
 			*ino = nm_maps_slots[i].ino;
 			nm_maps_slots[i].m = NULL;
+			atomic_dec(&nm_maps_live);
 			got = true;
 			break;
 		}
@@ -228,7 +241,7 @@ static int nm_kp_map_vma(struct kprobe *p, struct pt_regs *regs)
 {
 	const void *m = (const void *)regs->regs[0];
 	struct vm_area_struct *vma = (struct vm_area_struct *)regs->regs[1];
-	struct inode *inode;
+	const struct inode *inode;
 	dev_t dev, was_dev;
 	unsigned long ino, was_ino;
 
@@ -236,7 +249,12 @@ static int nm_kp_map_vma(struct kprobe *p, struct pt_regs *regs)
 		nm_maps_forget(m);
 		return 0;
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	/* show_map_vma() prints the user-visible inode of a backing file, so seed with it. */
+	inode = file_user_inode(vma->vm_file);
+#else
 	inode = file_inode(vma->vm_file);
+#endif
 	if (!inode) {
 		nm_maps_forget(m);
 		return 0;

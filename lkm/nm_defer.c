@@ -61,6 +61,10 @@
 
 #include "nm_defer.h"
 
+#ifndef atomic_set_release
+#define atomic_set_release(v, i) smp_store_release(&(v)->counter, (i))
+#endif
+
 /* 4096, and sized against DRAIN LATENCY rather than against a maxactive. 32 bytes a
  * slot, so 128 KB.
  *
@@ -112,7 +116,7 @@ static void nm_defer_drain(struct work_struct *w)
 		/* Release the slot before the put: the put can sleep, and a slot
 		 * held across it is a slot a handler cannot use. tmp is already
 		 * read, so reuse of this one cannot disturb the walk. */
-		atomic_set(&s->busy, 0);
+		atomic_set_release(&s->busy, 0);
 		path_put(&p);
 	}
 }

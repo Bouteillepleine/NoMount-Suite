@@ -5,6 +5,10 @@
 #include <linux/version.h>
 #include "nm_oot.h"
 
+#ifndef __nocfi
+#define __nocfi
+#endif
+
 static unsigned long (*nm_kln)(const char *name);
 
 /* The kprobe route on every kernel, not only 5.7 and newer.
@@ -39,7 +43,8 @@ static int nm_bootstrap_kln(void)
     return nm_kln ? 0 : -ENOENT;
 }
 
-unsigned long nm_oot_lookup_opt(const char *name)
+/* nm_kln points at the function body, which CFI_CLANG on 5.10/5.15 rejects with a panic. */
+noinline __nocfi unsigned long nm_oot_lookup_opt(const char *name)
 {
     if (!nm_kln && nm_bootstrap_kln() < 0)
         return 0;

@@ -16,8 +16,9 @@
 #include <asm/unaligned.h>
 #endif
 #include <linux/jump_label.h>
+#include <linux/exportfs.h>
 
-#define NM_MODULE_VERSION "1.36.2"
+#define NM_MODULE_VERSION "1.36.6"
 
 #define NOMOUNT_VERSION    36
 #define NOMOUNT_HASH_BITS  12
@@ -37,6 +38,8 @@
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
 #define kvzalloc(size, flags) kzalloc((size), (flags))
+#define kvmalloc(size, flags) kmalloc((size), (flags))
+#define kvmalloc_array(n, size, flags) kmalloc_array((n), (size), (flags))
 #endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
 #define kvcalloc(n, size, flags) kcalloc((n), (size), (flags))
@@ -52,6 +55,7 @@
 #define NM_CAP_FSYNC        (1 << 0)
 #define NM_CAP_ODIRECT      (1 << 1)
 #define NM_CAP_THPMAP       (1 << 2)
+#define NM_CAP_IOCTL        (1 << 3)
 #define NM_CAP_KNOWN        (1 << 7)
 
 #define NM_LOG_TAG "NoMount: "
@@ -102,12 +106,56 @@ struct nm_sop {
     const struct super_operations *orig_sop;
     const struct xattr_handler **orig_xattr;
     const struct xattr_handler **fake_xattr;
+    const struct export_operations *orig_export;
+    struct export_operations fake_export;
     struct super_block *sb;
     struct rcu_head rcu;
     struct list_head list;
 };
 
 struct nm_dsnap;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
+#include <linux/fileattr.h>
+#define NM_HAVE_FILEATTR 1
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+typedef struct file_kattr nm_fattr_t;
+#else
+typedef struct fileattr nm_fattr_t;
+#endif
+#endif
+
+/* A rule's uid scope, carried onto the inode it serves: one dentry is shared by every
+ * caller, so who is served what has to be decided per caller from the inode, not by
+ * invalidating the dentry (which shows every process mapping it "(deleted)"). */
+struct nm_scope_copy {
+    unsigned int uid;
+    unsigned int uid_end;
+    unsigned int deny[NM_DENY_MAX];
+    u8 deny_n;
+};
+
+/* A stock inode's fileattr answer, kept for an inode that has no stock counterpart to
+ * forward to. Two answers, because overlayfs gates FSGETXATTR and GETFLAGS differently
+ * (ovl_security_fileattr keys on fsx_valid): [0] for GETFLAGS, [1] for FSGETXATTR. */
+struct nm_fa_sample {
+    bool known;
+    int err[2];
+#ifdef NM_HAVE_FILEATTR
+    nm_fattr_t fa[2];
+#endif
+};
+
+/* What a regular file mirrors from a stock regular file. Kept on a directory rule for its
+ * children, which used to inherit the DIRECTORY's sample (no DIOALIGN, no THP mapping). */
+struct nm_file_sample {
+    bool known;
+    u8 cap;
+    u32 result_mask;
+    u32 dio_mem, dio_off;
+    u64 attributes, attr_mask;
+    struct nm_fa_sample fa;
+};
 
 struct nm_inode_info {
     struct path r_path;
@@ -126,6 +174,9 @@ struct nm_inode_info {
     u32 v_result_mask;
     u32 v_dio_mem, v_dio_off;
     u8  v_cap;
+    struct nm_fa_sample v_fa;
+    struct nm_file_sample v_cfile;
+    struct nm_scope_copy v_scope;
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
@@ -156,11 +207,24 @@ struct nomount_child_node {
     char name[]; 
 };
 
+struct nm_rlist;
+
 struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
     loff_t real_eof;
     loff_t max_real_pos;
+    /* The stock directory's own position space, for a caller served s_path instead of
+     * r_path: kept apart so neither moves the other's base. */
+    loff_t stock_eof;
+    loff_t max_stock_pos;
+    /* Where the filesystem's own listing last ended, per space: a resumed pass legitimately
+     * starts there even when it lies past the published base (ext4 htree ends at S64_MAX,
+     * which no base can hold; f2fs and tmpfs ends grow). */
+    loff_t real_end;
+    loff_t stock_end;
+    /* A hijacked erofs directory's real entries, read once (set-once, freed with the node). */
+    struct nm_rlist *rlist;
     u64 bloom_mask;
     bool has_public;
     atomic_t refcount;
@@ -203,6 +267,8 @@ struct nomount_rule {
     u32 v_result_mask;
     u32 v_dio_mem, v_dio_off;
     u8  v_cap;
+    struct nm_fa_sample v_fa;
+    struct nm_file_sample v_cfile;
     u8  pending;    /* minted, not yet stamped -- see nm_rule_visible() */
     kuid_t v_uid;
     kgid_t v_gid;
@@ -249,6 +315,9 @@ struct nm_rule_info {
     u32 v_result_mask;
     u32 v_dio_mem, v_dio_off;
     u8  v_cap;
+    struct nm_fa_sample v_fa;
+    struct nm_file_sample v_cfile;
+    struct nm_scope_copy v_scope;
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
@@ -292,6 +361,38 @@ static inline void nm_note_real_pos(struct nomount_dir_node *d, loff_t pos)
 {
     if (!d || pos <= 0 || pos > (loff_t)(S64_MAX - NM_POS_HEADROOM)) return;
     if (pos > READ_ONCE(d->max_real_pos)) WRITE_ONCE(d->max_real_pos, pos);
+}
+
+static inline bool nm_is_stock_virtual_pos(const struct nomount_dir_node *d, loff_t pos)
+{
+    loff_t eof, mx;
+
+    if (!d) return false;
+    eof = READ_ONCE(d->stock_eof);
+    mx  = READ_ONCE(d->max_stock_pos);
+    return eof && pos > eof && pos > mx && pos <= eof + NM_POS_HEADROOM;
+}
+
+static inline void nm_note_stock_pos(struct nomount_dir_node *d, loff_t pos)
+{
+    if (!d || pos <= 0 || pos > (loff_t)(S64_MAX - NM_POS_HEADROOM)) return;
+    if (pos > READ_ONCE(d->max_stock_pos)) WRITE_ONCE(d->max_stock_pos, pos);
+}
+
+/* Monotonic, like nm_publish_real_eof(); the stock directory is read-only, so its end
+ * does not move once seen. */
+static inline void nm_publish_stock_eof(struct nomount_dir_node *d, loff_t eof_hint)
+{
+    loff_t base;
+
+    if (!d) return;
+    base = READ_ONCE(d->max_stock_pos);
+    if (eof_hint > 0 && eof_hint <= (loff_t)(S64_MAX - NM_POS_HEADROOM) && eof_hint > base)
+        base = eof_hint;
+    if (!base) base = 2;
+    if (base < READ_ONCE(d->stock_eof))
+        return;
+    WRITE_ONCE(d->stock_eof, base);
 }
 
 static inline void nm_publish_real_eof(struct nomount_dir_node *d, loff_t eof_hint)

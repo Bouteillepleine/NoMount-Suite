@@ -93,9 +93,11 @@ jobs:
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android16-6.12'
             tc: clang
+          # The ACK branch, as the 6.12 row: the shipped .ko and the builders target it, and it
+          # carries Android's vendor hooks in the files the hunks land in.
           - ver: '6.18'
-            krepo: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'
-            kref: 'linux-6.18.y'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android17-6.18'
             tc: clang
     env:
       CCACHE_MAXSIZE: '2G'
@@ -302,6 +304,21 @@ jobs:
           fi
           echo "fuzz0 ${{ matrix.ver }}: YES - applies the way the builders apply it"
           echo "- \`${{ matrix.ver }}\` applies at --fuzz=0" >> "$GITHUB_STEP_SUMMARY"
+          # The FIONREAD hook comes in two variants, file_ioctl() (4.9-5.4) and
+          # do_vfs_ioctl() (5.10-6.18). The builders take the first that applies at
+          # fuzz 0, so exactly one may: none leaves FIONREAD on the module's i_size,
+          # two means a variant's context stopped being specific to its range.
+          FV=""
+          for v in "$GITHUB_WORKSPACE"/repo/hookless/patches/nomount_fionread_*.patch; do
+            patch -p1 --forward --fuzz=0 --dry-run -s < "$v" > /dev/null 2>&1 && FV="$FV $v"
+          done
+          set -- $FV
+          if [ "$#" -ne 1 ]; then
+            echo "FATAL: $# FIONREAD variants apply to ${{ matrix.ver }} at --fuzz=0, want exactly 1:$FV"
+            exit 1
+          fi
+          patch -p1 --forward --fuzz=0 < "$1"
+          echo "fionread ${{ matrix.ver }}: $(basename "$1")"
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
           grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
@@ -341,22 +358,19 @@ jobs:
           # Every grep here may legitimately match nothing, and this step runs under
           # `bash -e` with `set -o pipefail`, so each needs `|| true` or a clean
           # engine fails the leg before it compiles anything.
+          # Per token, not per line, so `defined(CONFIG_A) && !defined(CONFIG_B)` still gates A.
+          # Keep in step with extract_positive/extract_negative in scripts/gate-sweep.sh.
+          neg_re='(ifndef[[:space:]]+|![[:space:]]*(defined[[:space:]]*\(?|IS_ENABLED\()[[:space:]]*)CONFIG_[A-Z0-9_]+'
           cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' \
                  fs/nomount.c fs/nomount.h || true)
-          ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' fs/nomount.c fs/nomount.h || true)
-          all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
-          # `!IS_ENABLED(CONFIG_X)` is a NEGATIVE gate, but it is also matched by the `ie`
-          # grep above, so without it here the symbol landed in the positive set and this
-          # step demanded CONFIG_X=y -- the exact opposite of what the code needs, failing
-          # every leg. Keep in step with extract_positive/extract_negative in
-          # scripts/gate-sweep.sh, whose fixture now covers this form.
-          neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*(defined|IS_ENABLED))' \
+          ie=$(sed -E "s/$neg_re//g" fs/nomount.c fs/nomount.h \
+               | grep -oE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' || true)
+          gates=$(printf '%s\n%s\n' "$(printf '%s\n' "$cond" | sed -E "s/$neg_re//g")" "$ie" \
+                  | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
+          neg=$(printf '%s\n' "$cond" | { grep -oE "$neg_re" || true; } \
                 | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
           if [ -n "$neg" ]; then
-            gates=$(comm -23 <(printf '%s\n' "$all") <(printf '%s\n' "$neg"))
             echo "::notice::${{ matrix.ver }} negative-sense config gates (not asserted): $(echo $neg)"
-          else
-            gates=$all
           fi
           echo "engine config gates: ${gates:-none}"
           for g in $gates; do
@@ -387,6 +401,14 @@ jobs:
           echo "== compile fs/xattr.o =="
           make $MAKEOPTS fs/xattr.o 2>&1 | tail -5
           ls -l out/fs/xattr.o && echo "XATTR_OK ${{ matrix.ver }}"
+          echo "== assert ioctl.c FIONREAD hook placement =="
+          awk '/^\tcase [A-Z_0-9]+:/ { c=$2 } /nm_fionread_isize\(filp, inode\)/ { n++; if (c != "FIONREAD:") bad=1 }
+               END { exit !(n == 1 && !bad) }' fs/ioctl.c || {
+            echo "FATAL: the FIONREAD hook is missing, doubled or outside case FIONREAD for ${{ matrix.ver }}"; exit 1; }
+          make $MAKEOPTS fs/ioctl.o 2>&1 | tail -5
+          ls -l out/fs/ioctl.o && echo "IOCTL_OK ${{ matrix.ver }}"
+          aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -qw 'nm_fionread_isize' || {
+            echo "FATAL: nm_fionread_isize is not a global in nomount.o for ${{ matrix.ver }}"; exit 1; }
 
           echo "== compile fs/proc/task_mmu.o =="
           make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
@@ -526,6 +548,7 @@ jobs:
           set -e
           cd ksrc
           patch -p1 --forward --fuzz=0 < "$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
+          patch -p1 --forward --fuzz=0 < "$GITHUB_WORKSPACE/repo/hookless/patches/nomount_fionread_do_vfs_ioctl.patch"
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
 

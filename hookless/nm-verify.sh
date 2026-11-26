@@ -2,6 +2,7 @@
 NM=/data/adb/modules/meta-nomount/bin/arm64-v8a/nm
 [ -x "$NM" ] || { echo "fatal: nm client not found at $NM"; exit 1; }
 
+# A1 and A3 were fixed in v14; an older engine fails both by design.
 MIN_VER=14
 VOUT=$("$NM" v 2>/dev/null)
 VER=${VOUT%% *}

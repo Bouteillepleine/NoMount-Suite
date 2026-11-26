@@ -1,0 +1,23 @@
+NoMount: FIONREAD reports the size of the file this open serves (4.9-5.4: file_ioctl).
+
+FIONREAD answers i_size_read(file_inode(filp)) before any file operation runs. An engine
+inode is shared by every caller, and a caller the rule does not serve reads the STOCK file
+through it, so it was told the module file's size (a hidden app: hosts 56 bytes by fstat
+and read, 2,033,224 by FIONREAD). nm_fionread_isize() answers for the file actually read.
+
+One of two variants: this one fits 4.9, 4.14, 4.19 and 5.4, where FIONREAD lives in
+file_ioctl() on one line; nomount_fionread_do_vfs_ioctl.patch fits 5.10-6.18. Exactly one
+applies at fuzz 0 to any tree. Apply after nomount_kernel_integration.patch.
+
+diff --git a/fs/ioctl.c b/fs/ioctl.c
+--- a/fs/ioctl.c
++++ b/fs/ioctl.c
+@@ -493,4 +493,8 @@
+ 		return ioctl_fibmap(filp, p);
+ 	case FIONREAD:
++#ifdef CONFIG_NOMOUNT
++		{ extern loff_t nm_fionread_isize(struct file *, struct inode *);
++		  return put_user(nm_fionread_isize(filp, inode) - filp->f_pos, p); }
++#endif
+ 		return put_user(i_size_read(inode) - filp->f_pos, p);
+ 	case FS_IOC_RESVSP:
