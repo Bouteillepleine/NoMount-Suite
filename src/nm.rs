@@ -35,16 +35,20 @@ pub mod caps {
     /// it, and anything walking the package list gets ENOENT for a file PM says exists.
     pub const PM_REGISTERED_EXEMPT: u32 = 15;
 
-    /// v17 -- `7704ee0` "keep PUBLIC on a shadowed ROM APK", widened by `37e9124`
-    /// "honour PUBLIC on the read paths, widen it to PM codePaths". Below this the
-    /// PUBLIC flag is not honoured on reads, so warning about rules that lack it would
-    /// be advice the engine cannot act on.
-    pub const PUBLIC_ON_READ_PATHS: u32 = 17;
+    /// v18 -- `37e9124` "honour PUBLIC on the read paths, widen it to PM codePaths", which
+    /// bumped the wire 17 -> 18. 17 kept the bit and acted on none of it. Below this the
+    /// PUBLIC flag is not honoured on reads, so warning about rules that lack it would be
+    /// advice the engine cannot act on.
+    pub const PUBLIC_ON_READ_PATHS: u32 = 18;
 
     /// v26 -- `347ec5c` "forward the ghost control plane". Below this the engine has no
     /// `ghost_ctl`/`ghost_get_rule` forwarders, so the cloak cannot be listed and there
     /// is nothing to test.
     pub const GHOST_CONTROL_PLANE: u32 = 26;
+
+    /// v36 -- per-rule uid scopes (`--uid-range` / `--uid-excluded`). apkscope serves an
+    /// absorbed APK only with one, so below this every absorbed APK goes unserved.
+    pub const UID_SCOPE: u32 = 36;
 }
 
 pub struct Nm {
@@ -344,6 +348,14 @@ impl Nm {
         self.run(&["list"])
     }
 
+    /// `list`, asked once more after a failure: a torn dump (-EAGAIN) clears on its own.
+    pub fn list_retry(&self) -> Result<String> {
+        self.list().or_else(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            self.list()
+        })
+    }
+
     pub fn ghost_list(&self) -> Result<String> {
         self.run(&["l", "g"])
     }
@@ -572,24 +584,30 @@ pub(crate) fn parse_list_counted(list: &str) -> (Vec<LiveRule>, usize) {
     (rules, dropped)
 }
 
-fn parse_line(line: &str) -> Option<LiveRule> {
-    // Markers trail the path section and any of them may be absent: a Morphe
-    // rule is uid 0, so it prints no [UID:] at all and only [SCOPE:]/[DENY:].
-    // Cutting at the FIRST marker present keeps a scope out of the source path.
-    // Matched WITH the leading space the renderer emits (" [UID: n]", " [SCOPE: a-b]",
-    // " [DENY: x,y]" in userspace/src/nm.c), not as bare substrings. A bare search cuts
-    // anywhere in the line, including inside the path, so one rule target containing
-    // "[SCOPE:" was enough to truncate the parse. mount::path_is_representable now refuses
-    // such a target as well; this half covers a rule added out of band through `nm add`,
-    // which does not go through that guard.
+/// Split a `nm list` line into the path section and its trailing uid/scope markers.
+///
+/// Markers trail the path section and any of them may be absent: a Morphe
+/// rule is uid 0, so it prints no [UID:] at all and only [SCOPE:]/[DENY:].
+/// Cutting at the FIRST marker present keeps a scope out of the source path.
+/// Matched WITH the leading space the renderer emits (" [UID: n]", " [SCOPE: a-b]",
+/// " [DENY: x,y]" in userspace/src/nm.c), not as bare substrings. A bare search cuts
+/// anywhere in the line, including inside the path, so one rule target containing
+/// "[SCOPE:" was enough to truncate the parse. mount::path_is_representable now refuses
+/// such a target as well; this half covers a rule added out of band through `nm add`,
+/// which does not go through that guard.
+pub(crate) fn split_markers(line: &str) -> (&str, &str) {
     let cut = [" [UID:", " [SCOPE:", " [DENY:"]
         .iter()
         .filter_map(|m| line.find(m))
         .min();
-    let (head, tail) = match cut {
+    match cut {
         Some(i) => line.split_at(i),
         None => (line, ""),
-    };
+    }
+}
+
+fn parse_line(line: &str) -> Option<LiveRule> {
+    let (head, tail) = split_markers(line);
     let uid: u32 = tail
         .split_once("[UID:")
         .and_then(|(_, r)| r.split(']').next())

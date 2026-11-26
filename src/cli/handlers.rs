@@ -92,6 +92,23 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
                     anyhow::bail!("refusing {} {}: {why}", side, p.display());
                 }
             }
+            // The same door the planner and absorb apply: a relative source resolves against
+            // nm's cwd, and one in shared storage or under /data outside /data/adb is bytes
+            // any app or the shell can rewrite while they are served at a ROM path.
+            if !real.is_absolute() {
+                anyhow::bail!("refusing source {}: pass an absolute path", real.display());
+            }
+            if let Some(why) = crate::mount::absorb_refusal(real) {
+                anyhow::bail!("refusing source {}: {why}", real.display());
+            }
+            if crate::mount::source_is_untrusted(real) {
+                anyhow::bail!(
+                    "refusing source {}: it lives where a non-root process can rewrite the bytes \
+                     served at {}",
+                    real.display(),
+                    virt.display()
+                );
+            }
             if real.is_dir() {
                 anyhow::bail!(
                     "{} is a directory. A directory rule hides every stock entry under its \
@@ -477,9 +494,12 @@ fn report_ksu_source(nm: &Nm) -> Result<()> {
         Some(false) => println!("global \"umount modules by default\"\toff"),
         None => println!("global \"umount modules by default\"\tunreadable"),
     }
-    let installed = blocklist::installed_packages();
-    let total = installed.as_ref().map(|v| v.len()).unwrap_or(0);
-    match blocklist::ksu_denylist(&installed.unwrap_or_default()) {
+    let Some(installed) = blocklist::installed_packages() else {
+        println!("DenyList covers\tunknown - package map unreadable");
+        return Ok(());
+    };
+    let total = installed.len();
+    match blocklist::ksu_denylist(&installed) {
         Some(hits) => {
             println!("DenyList covers\t{} of {total} installed package(s)", hits.len());
             if following {
@@ -825,18 +845,12 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     }
                     continue;
                 }
-                let resolved = match blocklist::resolve(e) {
-                    Ok(r) => r,
-                    Err(err) => {
-                        eprintln!("nomount: skipping blocklist entry {e:?}: {err:#}");
-                        continue;
-                    }
-                };
-                let (row_appid, text) = match resolved {
-                    Resolved::Uid(uid) => {
+                let (row_appid, text) = match blocklist::resolve(e) {
+                    Ok(Resolved::Uid(uid)) => {
                         (Some(appid(uid)), format!("{e}\tuid {uid} · {}", state_of(uid)))
                     }
-                    Resolved::NotInstalled => (None, format!("{e}\tnot installed")),
+                    Ok(Resolved::NotInstalled) => (None, format!("{e}\tnot installed")),
+                    Err(err) => (None, format!("{e}\tunresolved - {err:#}")),
                 };
                 lines.push(Line {
                     appid: row_appid,

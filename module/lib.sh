@@ -54,6 +54,33 @@ else
     }
 fi
 
+# The manager's module card. ksud keeps a per-boot override; APatch and Magisk read
+# module.prop, and Magisk has no WebUI to point at.
+nm_card() {
+    if command -v ksud >/dev/null 2>&1; then
+        nmto 10 env KSU_MODULE=meta-nomount ksud module config set --temp \
+            override.description "$1" >/dev/null 2>&1
+        return
+    fi
+    _cd=$1
+    if [ -z "$APATCH" ] && ! command -v apd >/dev/null 2>&1; then
+        _cd=$(printf '%s' "$_cd" | sed 's/tap Reload in the WebUI/run nomount reload/; s/see the WebUI/run nomount check/')
+    fi
+    _cp="$MODDIR/module.prop"
+    [ -f "$_cp" ] || return 1
+    [ "$(sed -n 's/^description=//p' "$_cp" | head -1)" = "$_cd" ] && return 0
+    _cx=$(stat -c %C "$_cp" 2>/dev/null)
+    case "$_cx" in u:*) ;; *) _cx="" ;; esac
+    if NM_DESC="$_cd" awk '/^description=/ { print "description=" ENVIRON["NM_DESC"]; next } { print }' \
+            "$_cp" > "$_cp.nm$$" 2>/dev/null \
+        && chmod 0644 "$_cp.nm$$" && { [ -z "$_cx" ] || chcon "$_cx" "$_cp.nm$$"; } 2>/dev/null \
+        && mv -f "$_cp.nm$$" "$_cp" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$_cp.nm$$" 2>/dev/null
+    return 1
+}
+
 nm_state_dir_repair() {
     find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
     find "$NMDIR" -maxdepth 1 -mindepth 1 -type d -exec chmod 0700 {} + 2>/dev/null
@@ -154,9 +181,9 @@ nm_lkm_boot_load() {
     # The guard's own self-disable has to stop the insmod too: this ran four calls before
     # the first `disabled` test, so a parked Suite still inserted the engine module.
     [ -e "$NMDIR/disabled" ] && return 0
-    # Arm the counter before inserting kernel code, never after - see nm_guard_arm.
-    nm_guard_arm || return 0
     nm_set_bin
+    # Count and trip before inserting kernel code: an insmod that panics never reaches a later bump.
+    nm_guard_bump "engine module load" || return 0
     NM_LKM_SAY=:
     NM_LKM_NM="$NM_BIN"
     NM_LKM_LOADER="$MODDIR/loader"
@@ -182,7 +209,7 @@ nm_lkm_boot_load() {
 
 nm_fix_shell_tmp() {
     _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
-           | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
+           | tail -n 1 | tr -d '\r' | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
     [ "${_fst:-1}" = "1" ] || return 0
     [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
     if [ ! -d /data/local/tmp ]; then
@@ -295,16 +322,9 @@ nm_early_absorb() {
     fi
 }
 
-# The counter half of the guard, split out of nm_guard_bump so that the one thing in the
-# boot set which inserts kernel code can arm it FIRST. nm_lkm_boot_load runs before
-# nm_guard_bump on every path (post-fs-data.sh:19 vs :39, metamount.sh:61 vs :65, and the
-# KSU path exits post-fs-data.sh before its own bump), so a .ko that panics on init or in a
-# VFS hot path rebooted with bootcount still at its previous value: every boot was
-# identical, GUARD_MAX was never reached, and the guard could not park the Suite.
-#
-# Idempotent for the boot: guard.ts holds this boot's boot_id once armed, so the later
-# nm_guard_bump consumes this count instead of adding a second one. If boot_id cannot be
-# read we arm unconditionally, which is the old behaviour and errs toward tripping early.
+# The counter half of the guard. Idempotent for the boot: guard.ts holds this boot's
+# boot_id once armed, so a second nm_guard_bump in the same boot does not count twice.
+# If boot_id cannot be read every call counts, so one boot reaches GUARD_MAX and trips it.
 nm_guard_arm() {
     for _f in bootcount disabled; do
         if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then

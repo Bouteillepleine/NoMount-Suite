@@ -88,8 +88,15 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openDetail() {
+  function openDetail(el) {
     showTab("diag", document.getElementById("nb-diag"));
+    // From the incident banner: open the record it is about, not just the tab.
+    if (el && el.closest && el.closest("#incwarn")) {
+      expandCard("incidentcard");
+      const card = $("incidentcard");
+      if (card) setTimeout(function () { card.scrollIntoView({ behavior: "smooth" }); }, 150);
+      return;
+    }
     if (!CHECK && !CHECK_RUNNING) runCheck(null);
   }
 

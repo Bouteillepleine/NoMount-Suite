@@ -65,7 +65,8 @@
     )).stdout.trim();
     const staged = !!pv;
     $("ver").textContent = SUITE_VERSION;
-    $("hdreng").textContent = eng;
+    // The build, not just the protocol: v1.3.217 made it the thing that tells kernels apart.
+    $("hdreng").textContent = ev && ev.build ? eng + " · " + ev.build : eng;
     $("vstage").hidden = !staged;
     $("ver").title = staged
       ? pv + " is installed but not live yet: its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
@@ -91,7 +92,7 @@
     uidOp: (el, ev, arg) => uidOp(arg, el),
     toggleTheme: () => toggleTheme(),
     setNav: (el, ev, arg) => setNav(arg),
-    openDetail: () => openDetail(),
+    openDetail: (el) => openDetail(el),
     toggleCard: (el) => toggleCard(el),
     toggleWhiteouts: (el) => toggleWhiteouts(el),
     toggleRules: (el) => toggleRules(el),
@@ -115,6 +116,7 @@
     reloadRules: (el) => reloadRules(el),
     clearRules: (el) => clearRules(el),
     clearIncident: (el) => clearIncident(el),
+    copyIncident: (el) => copyIncident(el),
     rearm: (el) => rearm(el),
     renderFilesFull: () => renderFilesFull(),
     filterRules: () => filterRules(),
@@ -145,6 +147,12 @@
   }
 
   document.addEventListener("click", _delegate("data-act"));
+  // Touch has no hover: a tap shows what a tooltip-only explanation says.
+  document.addEventListener("click", function (ev) {
+    const el = ev.target && ev.target.closest
+      ? ev.target.closest(".tag[title], .files.status[title], .tip[title]") : null;
+    if (el && !el.closest("button")) toast(el.getAttribute("title"), "");
+  });
   document.addEventListener("mousedown", _delegate("data-act-down"));
   document.addEventListener("input", _delegate("data-act-input"));
   document.addEventListener("keydown", _delegate("data-act-key"));

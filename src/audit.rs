@@ -929,7 +929,9 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
                 }
             }
         }
-        if stock_max.is_empty() || dirs.is_empty() {
+        // A parent with no stock folder beside ours still has to be compared, or said not
+        // to be: skipping it read as "you have none" or as a PASS that never looked.
+        if dirs.is_empty() {
             continue;
         }
         // What the filesystem has issued, from the subtree, not just the direct children.
@@ -943,11 +945,14 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         }
         let mut ranged = false;
         for (p, d, i) in dirs {
-            let Some(&sm) = stock_max.get(&d) else {
-                unranged.push(format!("{} dev {d}", p.display()));
-                continue;
+            let (lo, sm) = match (stock_max.get(&d), subtree.get(&d)) {
+                (Some(&sm), _) => (stock_min.get(&d).copied().unwrap_or(0), sm),
+                (None, Some(&(a, b))) => (a, b),
+                (None, None) => {
+                    unranged.push(format!("{} dev {d}", p.display()));
+                    continue;
+                }
             };
-            let lo = stock_min.get(&d).copied().unwrap_or(0);
             // Prefer the subtree's range where it is wider than the direct children's: an
             // overlay counter interleaves the numbers of directories further down, so the
             // next one it would issue sits above the siblings and is not a tell.
@@ -1258,8 +1263,8 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     if bad.is_empty() {
         pass(N_EROFS_SHAPE, format!("{ok} erofs parent(s) match the dirent model"))
             .meaning(
-                "Folders holding injected or hidden files still report the size their contents imply \
- - no arithmetic trace.",
+                "Folders holding injected files still report the size their contents imply - no \
+                 arithmetic trace. Folders holding only hidden files are not examined here.",
             )
     } else {
         soft(
@@ -1297,12 +1302,16 @@ fn maps_ino(rest: &str) -> Option<u64> {
     it.next()?.parse::<u64>().ok()
 }
 
-fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
+/// `root_served`: the targets root itself is served (uid-0 rules). A uid-scoped rule is
+/// legitimately stock for root, so comparing its maps inode with root's stat() was a FAIL
+/// for the engine working as designed.
+fn check_maps_not_deleted(targets: &[PathBuf], root_served: &[PathBuf]) -> Check {
     if targets.is_empty() {
         return na(N_MAPS_DELETED, "no live rules".into())
             .meaning("Nothing is being injected yet, so no process can have one mapped.");
     }
     let want: HashSet<&Path> = targets.iter().map(PathBuf::as_path).collect();
+    let root_view: HashSet<&Path> = root_served.iter().map(PathBuf::as_path).collect();
     let Ok(rd) = fs::read_dir("/proc") else {
         return unmeasured(N_MAPS_DELETED, "cannot read /proc".into())
             .meaning("The process list could not be read, so this was not tested.");
@@ -1350,7 +1359,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             // the backing file's real inode while stat() answers with the engine's - and
             // an app reads its OWN maps with no permission at all. A `(deleted)` row is
             // the pending-reboot case handled below, so it is left out of this compare.
-            if !deleted {
+            if !deleted && root_view.contains(Path::new(path)) {
                 if let (Some(mino), Ok(md)) = (maps_ino(rest), fs::metadata(path)) {
                     use std::os::unix::fs::MetadataExt;
                     if mino != 0
@@ -1382,9 +1391,10 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
              the same path - no permission needed",
         )
         .meaning(
-            "This kernel serves injections but was built without the show_map_vma() hunk of \
-             the integration patch, so a mapping still reports the module file's inode while \
-             stat() reports the engine's. Rebuild the kernel with the patch applied.",
+            "A mapping still reports the module file's inode while stat() reports the \
+             engine's. On a built-in engine the kernel was built without the show_map_vma() \
+             hunk of the integration patch: rebuild it with the patch applied. On the LKM the \
+             maps spoof had no free note for it; the module logs that table pressure once.",
         )
         .owner("the kernel engine");
     }
@@ -1598,6 +1608,24 @@ fn check_pm_apks_open_when_hidden(
         .meaning(
             "Some published files could not be tested - they refused the app for a reason that \
              has nothing to do with hiding - so this is an incomplete result, not a clean one.",
+        );
+    }
+    // A rule whose source root cannot open is the stale-serve case (a module removed without
+    // a reload), so it must not drop out of the denominator of a PASS.
+    let unreadable = apks.len() - readable.len();
+    if denied == 0 && mismatched == 0 && unreadable > 0 {
+        return unmeasured(
+            NAME,
+            format!(
+                "{who} opened all {tested} it could be tested on, but {unreadable} of {} \
+                 PM-published rule(s) have a source root cannot open",
+                apks.len()
+            ),
+        )
+        .meaning(
+            "Some rules serve from a file that no longer opens even as root - usually a module \
+             removed or updated without a reload - so they could not be compared, and this is \
+             an incomplete result, not a clean one.",
         );
     }
     if denied == 0 && mismatched == 0 {
@@ -1931,7 +1959,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_synth_dir_ino(&targets, &engine_dirs),
         check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
-        check_maps_not_deleted(&all_inject_targets),
+        check_maps_not_deleted(&all_inject_targets, &targets),
         check_pm_apks_open_when_hidden(&targets, &inject_sources),
         check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),

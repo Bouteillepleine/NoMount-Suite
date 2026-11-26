@@ -31,6 +31,14 @@
       .join("\n");
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
     const byModule = await planByModule();
+    // Served means the engine holds a live rule from the module, not that the plan lists
+    // files: with the engine down or the Suite parked the plan still has them.
+    const dump = await ruleDump();
+    const liveBy = {};
+    if (dump.ok) dump.lines.forEach(function (l) {
+      const m = _ruleModule(l); liveBy[m] = (liveBy[m] || 0) + 1;
+    });
+    const isLive = function (id) { return dump.ok && (liveBy[id] || 0) > 0; };
     // The check already works out which modules ship files nobody serves
     // and names the owner. Say it on the row, not only in the count.
     const unservedBy = {};
@@ -39,7 +47,7 @@
     });
     const rows = out.split("\n").filter(Boolean);
     $("modcount").textContent = rows.length;
-    let served = 0;
+    let served = 0, planned = 0;
     box.innerHTML = rows.map((l) => {
       const p = l.split("|");
       const id = p[0];
@@ -49,13 +57,18 @@
       const mnt = /^\d+$/.test(mntRaw) ? parseInt(mntRaw, 10) : -1;
       let label, cls, showCnt = false, tip = "";
       if (p[1] === "suite") { label = "suite"; cls = "suite"; tip = "The NoMount Suite metamodule itself."; }
-      else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; tip = "Provides su; not injected by the Suite."; }
+      else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; planned++; tip = "Provides su; not injected by the Suite."; }
       else if (p[1] === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
       else if (!plan) { label = "?"; cls = "off"; tip = "The plan could not be read, so what this module contributes is unknown."; }
-      else if (plan.overlay && plan.vfs) { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
-      else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; showCnt = true; }
-      else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
-      else if (plan.bind) { label = "bind"; cls = "off"; served++; showCnt = true;
+      else if ((plan.overlay || plan.vfs) && !isLive(id)) {
+        label = "not live"; cls = "info"; showCnt = true; planned++;
+        tip = dump.ok ? "Planned, but the engine holds no rule from it. Press Reload on Status."
+                      : "The engine's rule list could not be read, so whether it is served is unknown.";
+      }
+      else if (plan.overlay && plan.vfs) { label = "vfs + overlay"; cls = "ov"; served++; planned++; showCnt = true; }
+      else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; planned++; showCnt = true; }
+      else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; planned++; showCnt = true; }
+      else if (plan.bind) { label = "bind"; cls = "off"; served++; planned++; showCnt = true;
                             tip = "Served by a real bind mount, not an injection: a my_* target is bound unless the my_hookless trial is on."; }
       else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve: scripts, zygisk, binaries, or an empty partition directory."; }
       // A module that contributes nothing says so in the left slot, where a file
@@ -89,7 +102,8 @@
       return `<div class="mrow${uns ? " unserved" : ""}"><div class="mname">${esc(id)}</div>${why}` +
              `<div class="mmeta">${files}${kind}${vis}</div></div>`;
     }).join("");
-    MOD_SERVED = served;
+    MOD_SERVED = dump.ok ? served : -1;
+    MOD_PLANNED = planned;
     paintModuleMetric();
   }
 
@@ -228,8 +242,9 @@
       const st = (l.split("\t")[1] || "").trim();
       const cls = /^hidden/.test(st) ? "vfs"
         : /^not applied \(and no such path/.test(st) ? "off" : "info";
-      const hint = /^not applied - run/.test(st) ? "saved, not live yet · tap Reload on Status"
-                 : /^applied, but still visible/.test(st) ? "the engine is not serving it · tap Reload on Status"
+      const reload = /^not applied - run/.test(st) || /^applied, but still visible/.test(st);
+      const hint = /^not applied - run/.test(st) ? "saved, not live yet"
+                 : /^applied, but still visible/.test(st) ? "the engine is not serving it"
                  : /^not applied \(and no such path/.test(st) ? "this ROM has no such path · nothing to hide"
                  : "";
       const tag = /^not applied \(/.test(st) ? "not applied" : st.split(" - ")[0];
@@ -237,6 +252,7 @@
              `<div class="ab-path">${esc(path)}</div>` +
              (hint ? `<div class="ab-why">${esc(hint)}</div>` : "") + `</span>` +
              `<span class="tag ${cls}">${esc(tag)}</span>` +
+             (reload ? `<button class="act sec u-btn-tight" data-act="reloadRules">Reload</button>` : "") +
              `<button class="bx" title="Stop hiding" data-act="wodel" data-nmp="${esc(path)}">✕</button></div>`;
     }).join("") + autoHtml;
   }
@@ -277,16 +293,20 @@
   function absorbable(r) {
     const c = findCheck(r, "zero-mount-posture");
     if (!c) return -1;
-    if (c.verdict === "pass") return 0;
+    // A tmpfs over the ROM is not a /data/adb mount, so the posture row passes it; absorb
+    // takes it over at runtime all the same.
+    const t = findCheck(r, "tmpfs-over-the-rom");
+    const tmpfs = t && t.verdict === "fail" ? 1 : 0;
     if (c.verdict === "unmeasured") return -1;
-    if (c.verdict === "note" || c.verdict === "warn") return 0;
+    if (c.verdict === "pass" || c.verdict === "note" || c.verdict === "warn") return tmpfs;
     const m = c.evidence && c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
-    return m ? parseInt(m[1], 10) : -1;
+    return m ? parseInt(m[1], 10) + tmpfs : -1;
   }
   async function refreshAbsorbed() {
     const box = $("abDone");
     if (!box) return;
     const r = await exec(
+      "[ -e /data/adb/nomount/absorbed.list ] || exit 0; " +
       "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; " +
       "t=${l%%\t*}; s=${l#*\t}; " +
       "[ \"$t\" = \"$s\" ] && continue; " +
@@ -322,6 +342,7 @@
 
   let ABSORBED_N = -1;
   let MOD_SERVED = -1;
+  let MOD_PLANNED = -1;
   // Coverage is the thing the Suite exists to get right, so it goes on Status
   // rather than in a check nobody opens. Painted by whichever of refreshModules
   // and refreshAbsorbed finishes last: they run in parallel.
@@ -333,6 +354,15 @@
     // number presented as current.
     if (MOD_SERVED < 0) {
       $("mMod").textContent = "?";
+      return;
+    }
+    // Planned is not served: with the engine down or the Suite parked, nothing is.
+    if (ENGINE_STATE && ENGINE_STATE !== "live") {
+      $("mMod").innerHTML = "0<small>engine down · " + MOD_PLANNED + " planned</small>";
+      return;
+    }
+    if (GUARD_TRIPPED === true) {
+      $("mMod").innerHTML = "0<small>paused · " + MOD_PLANNED + " planned</small>";
       return;
     }
     // "0 unserved" is the strongest claim this page makes: the module set is
@@ -357,20 +387,24 @@
     else if (ABSORBED_N < 0) rest.push("absorbed unknown");
     rest.push(unserved < 0 ? "coverage unchecked" : unserved + " unserved");
     $("mMod").innerHTML = MOD_SERVED +
-      "<small>served · " + rest.join(" · ") + "</small>";
+      "<small>of " + MOD_PLANNED + " live · " + rest.join(" · ") + "</small>";
   }
 
   async function refreshAbsorb() {
     await refreshAbsorbed();
     paintAbsorbChip();
   }
+  // A Scan of this boot beats the cached report's one mount row, which misses a ROM tmpfs
+  // and any bind made after the check: only a measured zero is painted as clean.
+  let ABSORB_SCAN_N = null;
   function paintAbsorbChip() {
     const chip = $("abchip");
     if (!chip) return;
-    const n = absorbable(CHECK);
+    const scanned = ABSORB_SCAN_N !== null;
+    const n = scanned ? ABSORB_SCAN_N : absorbable(CHECK);
     if (n < 0) { chip.textContent = " - "; chip.className = "chip"; return; }
     chip.textContent = n === 0 ? (ABSORBED_N > 0 ? "none left" : "none") : String(n);
-    chip.className = n === 0 ? "chip ok" : "chip info";
+    chip.className = n > 0 ? "chip info" : scanned ? "chip ok" : "chip";
   }
 
   async function abScan(btn) {
@@ -383,6 +417,10 @@
     if (!lines.length) {
       box.innerHTML = '<div class="empty">No answer from absorb.</div>';
     } else {
+      if (r.errno === 0) {
+        ABSORB_SCAN_N = lines.filter(function (l) { return /^would (absorb|empty) /.test(l); }).length;
+        paintAbsorbChip();
+      }
       const KINDS = [
         [/^skipping the tmpfs over /, "off",  "left alone"],
         [/^skipping /,                "off",  "left alone"],
@@ -430,8 +468,8 @@
   }
 
   async function abAbsorb(btn) {
-    const n = absorbable(CHECK);
-    if (n === 0) { toast("Nothing to absorb", "ok"); return; }
+    // Only a Scan's zero is a reason to refuse; the cached report's is not.
+    if (ABSORB_SCAN_N === 0) { toast("Nothing to absorb (per the last Scan)", "ok"); return; }
     if (!(await confirmAction(
       "Absorb other modules' mounts?",
       "Each bind another module made is re-served as a Prism injection and then unmounted. " +
@@ -523,8 +561,10 @@
     $("vfsfull").innerHTML = !f.length ? '<div class="empty">(no match)</div>'
       : f.map(p => {
           const ov = /\/overlay\/[^\s]*\.apk$/.test(p);
-          return `<div class="row"><span class="name mono" title="${esc(p)}">` +
-                 `${esc(p.replace(/^.*\//, ""))}</span>` +
+          // The folder dimmed before the name: every appfeature.xml looked the same.
+          const cut = p.lastIndexOf("/");
+          return `<div class="row"><span class="name mono">` +
+                 `<span class="dim">${esc(p.slice(0, cut + 1))}</span>${esc(p.slice(cut + 1))}</span>` +
                  `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
         }).join("");
   }
@@ -592,11 +632,12 @@
     else toast(failText(r), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
     await refreshAll().catch(refreshFailed);
-    const w = $("incwarn");
-    if (w && r.errno === 0 && /REBOOT REQUIRED/.test(out)) {
-      w.hidden = false;
-      w.innerHTML = "⚠️ A system APK changed. <b>reboot to finish</b>. " +
+    // Held in REBOOT_NOTICE: the next refresh's refreshIncident hid it while the reboot was
+    // still required.
+    if (r.errno === 0 && /REBOOT REQUIRED/.test(out)) {
+      REBOOT_NOTICE = "⚠️ A system APK changed. <b>reboot to finish</b>. " +
         "Until then, apps over those APKs can force-close.";
+      refreshIncident();
     }
   }
   async function clearRules(btn) {
@@ -604,7 +645,8 @@
       "Clear every injection rule?",
       "Every file your modules add disappears straight away; apps go back to seeing the stock " +
       "ROM, and anything relying on an injected file may misbehave until you put them back. " +
-      "Nothing is uninstalled: Reload, or a reboot, restores all of it.",
+      "Nothing is uninstalled: a reboot restores all of it. Reload restores your modules' " +
+      "files; absorbed rules come back at the next Absorb or reboot.",
       "Clear rules"))) return;
     const done = busy(btn, "Clearing...");
     const r = await nm("vfs clear");
@@ -620,16 +662,18 @@
   async function rearm(btn) {
     if (!(await confirmAction(
       "Re-arm the bootloop guard?",
-      "This deletes the record of the boot that failed, including the crash log, which is the " +
-      "only copy and usually names the file that caused it. Read or copy it first. The Suite " +
-      "stays off until you reboot.",
-      "Delete and re-arm"))) return;
+      "The record of the boot that failed is kept as incident.prev, and Copy incident on the " +
+      "card still works until the next one. The Suite stays off until you reboot.",
+      "Re-arm"))) return;
     btn.disabled = true;
     // Branch on the result. The toast is what the user reads before rebooting, so
     // announcing "re-armed" on an rm that failed -- a denial, a read-only /data -- sent
     // them into a reboot still parked. refreshGuard() repaints afterwards, but by then
     // they have already acted on the toast.
-    const r = await exec("/system/bin/rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
+    const r = await exec(
+      "N=/data/adb/nomount; " +
+      "if [ -f $N/incident.log ]; then /system/bin/mv -f $N/incident.log $N/incident.prev || exit 1; fi; " +
+      "/system/bin/rm -rf $N/disabled $N/bootcount");
     if (r.errno === 0) {
       toast("Guard re-armed · reboot to re-enable", "ok");
     } else {

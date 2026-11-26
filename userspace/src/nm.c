@@ -12,7 +12,12 @@ void c_main(long *sp) {
         goto do_exit;
     }
 
+    /* tests/nm-argv-check.py builds with -DNM_TEST_FD=3 and plays the engine on that fd. */
+#ifdef NM_TEST_FD
+    int fd = NM_TEST_FD;
+#else
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
+#endif
     if (fd < 0) {
         unsigned int sock_err = (unsigned int)-fd;
         print_err("nm: cannot open the NoMount netlink socket on proto ");
@@ -75,6 +80,13 @@ void c_main(long *sp) {
         } else if (strcmp(argv[i], "--uid") == 0 && i + 1 < argc) {
             if (parse_u32(argv[++i], &sc_uid)) {
                 print_err("nm: --uid takes a number\n"); exit_code = 3; goto do_exit; }
+            /* uid 0 with no end is the unscoped marker, the same collapse as `0-0`. */
+            if (sc_uid == 0) {
+                print_err("nm: --uid 0 is the unscoped marker on the wire, so it would be\n"
+                          "    sent as a rule visible to every user. --uid 100000 names\n"
+                          "    appid 0 in every user.\n");
+                exit_code = 3; goto do_exit;
+            }
             scoped = 1;
         } else if (strcmp(argv[i], "--uid-range") == 0 && i + 1 < argc) {
             if (parse_range(argv[++i], &sc_uid, &sc_uid_end)) {
@@ -127,6 +139,16 @@ void c_main(long *sp) {
     } else if (scoped && cmd == 'w') {
         print_err("nm: w has no scoped form - whiteout everyone with `nm w <path>`, or scope "
                   "a rule with `nm rule add --uid ...`\n");
+        exit_code = 3; goto do_exit;
+    } else if (scoped && cmd != 'A' && cmd != 'D') {
+        /* `nm clear --uid X` sent a bare CLEAR_ALL: every rule and the uid hide list. */
+        print_err("nm: --uid/--uid-range/--uid-excluded apply only to add, del and "
+                  "rule add|del\n");
+        exit_code = 3; goto do_exit;
+    }
+    if ((cmd == 'b' || cmd == 'u') && p_count > 1) {
+        print_err((cmd == 'b') ? "nm: block takes one uid at a time\n"
+                               : "nm: unblock takes one uid at a time\n");
         exit_code = 3; goto do_exit;
     }
 

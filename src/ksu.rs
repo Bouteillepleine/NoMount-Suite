@@ -25,6 +25,7 @@ const fn ioc(dir: u32, nr: u32, size: u32) -> u32 {
 
 const GET_INFO: u32 = ioc(DIR_READ, 2, 16);
 const GET_INFO_LEGACY: u32 = ioc(DIR_READ, 2, 0);
+const UID_GRANTED_ROOT: u32 = ioc(DIR_READ | DIR_WRITE, 8, 0);
 const UID_SHOULD_UMOUNT: u32 = ioc(DIR_READ | DIR_WRITE, 9, 0);
 const GET_MANAGER_APPID: u32 = ioc(DIR_READ, 10, 0);
 const ADD_TRY_UMOUNT: u32 = ioc(DIR_WRITE, 18, 0);
@@ -45,6 +46,12 @@ pub struct Info {
     pub flags: u32,
     pub features: u32,
     pub uapi_version: u32,
+}
+
+#[repr(C)]
+struct GrantedRootCmd {
+    uid: u32,
+    granted: u8,
 }
 
 #[repr(C)]
@@ -146,6 +153,16 @@ pub fn uid_should_umount(uid: u32) -> Option<bool> {
 /// Next, SukiSU and ReSukiSU all answer this same ioctl with the same struct.
 ///
 /// `None` means the question could not be put to the kernel -- never "no manager".
+/// Whether KernelSU has granted root to exactly this uid (its allow_su), from the kernel.
+pub fn uid_granted_root(uid: u32) -> Option<bool> {
+    if !available() {
+        return None;
+    }
+    let mut cmd = GrantedRootCmd { uid, granted: 0 };
+    ksuctl(UID_GRANTED_ROOT, &mut cmd).ok()?;
+    Some(cmd.granted != 0)
+}
+
 pub fn manager_appid() -> Option<u32> {
     if !available() {
         return None;

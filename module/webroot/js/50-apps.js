@@ -69,18 +69,24 @@
       else if (/\blive\b/.test(s)) cls = "live";
       const uidM = s.match(/uid (\d+)/);
       const viaM = s.match(/^via (\S+)/);
+      // A DenyList row is KernelSU's setting, not an entry in this list: there is nothing
+      // here to remove, and `uid unblock KernelSU` answered ok while the app stayed hidden.
+      const viaKsu = /^via KernelSU DenyList/.test(s);
       const target = viaM ? viaM[1]
         : (/^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name);
       const xTitle = viaM ? `Remove ${viaM[1]}, the rule hiding this app` : "Unhide";
-      const actionable = UID_TARGET_RE.test(target);
+      const actionable = !viaKsu && UID_TARGET_RE.test(target);
       const covIdx = s.indexOf(" \u00b7 also covered by ");
       const sHead = covIdx === -1 ? s : s.slice(0, covIdx);
       const sCov  = covIdx === -1 ? "" : s.slice(covIdx + 3);
       const save = cls === "drift" && actionable
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
+      const apply = cls === "pending"
+        ? `<button class="act sec u-btn-tight" data-act="apply" data-nmt="${esc(target)}">Apply now</button>` : "";
       return { active: cls === "live" || cls === "pending" || cls === "drift",
                hiding: cls === "live" || cls === "drift",
                unknown: cls === "unknown",
+               glob: /[*]/.test(name) || /^glob\b/.test(s),
                key: uidM ? uidM[1] : name,
                html: `<div class="blk ${cls}">
         <span class="dot"></span>
@@ -89,7 +95,9 @@
           ${sCov ? `<span class="bcov">${esc(sCov)}</span>` : ""}
         </span>
         ${save}
-        ${actionable ? `<button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
+        ${apply}
+        ${actionable ? `<button class="bx" title="${esc(xTitle)}" aria-label="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
+        ${viaKsu ? `<span class="bks">set in KernelSU</span>` : ""}
       </div>` };
     }).concat(diag.map(function (l) {
       return {
@@ -111,8 +119,11 @@
         `<div class="blk-sub">These are saved, but the engine did not answer, so whether they are
           in force right now is unknown.</div>` + htmlOf(unknown) : "") +
       (waiting.length ? `<div class="blk-head">Waiting · ${waiting.length}</div>` +
-        `<div class="blk-sub">Nothing installed matches these yet. A glob keeps watching, so a
-          detector installed later is hidden the moment it appears.</div>` + htmlOf(waiting) : "");
+        `<div class="blk-sub">${waiting.some(function (x) { return x.glob; })
+          ? "Nothing installed matches these yet. A pattern keeps watching, so an app installed " +
+            "later is hidden the moment it appears."
+          : "These apps are not installed. Each is hidden as soon as it is."}</div>` +
+        htmlOf(waiting) : "");
   }
 
   document.getElementById("blocked").addEventListener("click", ev => {
@@ -120,8 +131,19 @@
     if (!b) return;
     const t = b.getAttribute("data-nmt") || "";
     if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
-    if (b.getAttribute("data-act") === "save") saveOne(t, b); else unblockOne(t, b);
+    const act = b.getAttribute("data-act");
+    if (act === "save") saveOne(t, b);
+    else if (act === "apply") applyNow(b);
+    else unblockOne(t, b);
   });
+  async function applyNow(btn) {
+    const done = busy(btn, "Applying...");
+    const r = await nm("uid apply");
+    done();
+    toast(r.errno === 0 ? ((r.stdout || "").trim().split("\n").pop() || "Applied") : failText(r),
+          r.errno === 0 ? "ok" : "bad");
+    refreshBlocked();
+  }
   function usPickFrom(row) {
     if (!row) return;
     const t = row.getAttribute("data-nmt") || "";
@@ -247,7 +269,14 @@
       return;
     }
     const out = r.stdout || "";
-    const on = /follow KernelSU DenyList\s+on/.test(out);
+    // "unknown" (uidhide.conf unreadable) is neither: lighting Ignore said the opposite of
+    // what the CLI does with an unreadable setting.
+    const setting = out.match(/follow KernelSU DenyList\t(on|off)\b/);
+    if (!setting) {
+      ksuPaint(null, "Could not read the saved setting.", true);
+      return;
+    }
+    const on = setting[1] === "on";
     if (/KernelSU driver\s+no answer/.test(out)) {
       ksuPaint(on ? "on" : "off",
                on ? "Followed, but no driver answered." : "No KernelSU driver.",
@@ -258,9 +287,15 @@
     const dflt = /umount modules by default"?\s+ON/.test(out);
     let note = "";
     if (cov) {
-      note = on
-        ? `Hiding from ${cov[1]} of ${cov[2]} apps.`
-        : `${cov[1]} of ${cov[2]} apps listed, not followed.`;
+      // Membership is not hiding: count the apps the CLI reports live.
+      const live = (out.match(/· live\b/g) || []).length;
+      note = !on
+        ? `${cov[1]} of ${cov[2]} apps listed, not followed.`
+        : live === parseInt(cov[1], 10)
+          ? `Hiding from ${live} of ${cov[2]} apps.`
+          : `${cov[1]} of ${cov[2]} apps listed, ${live} hidden right now.`;
+    } else if (/DenyList covers\s+unknown/.test(out)) {
+      note = "Package list unreadable, coverage unknown.";
     }
     if (dflt) note += " ⚠ Global umount-by-default is on.";
     ksuPaint(on ? "on" : "off", note.trim(), on && dflt);
@@ -270,7 +305,14 @@
     const btns = Array.prototype.slice.call(seg.querySelectorAll(".seg-b"));
     btns.forEach(function (b) { b.disabled = true; });
     try {
-      const r = await nm(`uid ksu ${state}`);
+      let r = await nm(`uid ksu ${state}`);
+      // The refusal names --force; offer it instead of leaving the user a flag to type.
+      if (r.errno !== 0 && state === "on" && /--force/.test(r.stderr || "") && (await confirmAction(
+        "Follow anyway?",
+        ((r.stderr || "").replace(/^Error:\s*/, "").split("\n")[0]).replace(/,? or pass --force.*$/, "."),
+        "Follow anyway (hides from every app)"))) {
+        r = await nm("uid ksu on --force");
+      }
       if (r.errno === 0) {
         toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
         await refreshKsuSource();
@@ -312,7 +354,18 @@
       return;
     }
     const degraded = /no detector inventory/i.test(r.stderr || "");
-    usParse(r.stdout);
+    // uidscan.sh prints its previous cache when pm lists nothing; that is not a fresh scan.
+    const reused = /keeping the previous cache/i.test(r.stderr || "");
+    if (!reused) {
+      // A fresh scan replaces the old one, so an app uninstalled since drops out; a pick
+      // the user made carries over for an app still listed.
+      const picks = new Map([...US].map(function ([p, e]) { return [p, e.pick]; }));
+      US.clear();
+      usParse(r.stdout);
+      US.forEach(function (e, p) { if (picks.has(p)) e.pick = picks.get(p); });
+    } else {
+      usParse(r.stdout);
+    }
     const cur = await nm("uid list");
     (cur.stdout || "").split("\n").forEach(function (l) {
       const name = l.split("\t")[0].trim();
@@ -321,7 +374,8 @@
     done();
     if (!usShown) usToggle($("usShow"));
     usRender();
-    const note = degraded ? " (by manifest only; the detector name list was unavailable)" : "";
+    const note = (degraded ? " (by manifest only; the detector name list was unavailable)" : "") +
+      (reused ? " (from the last scan; this one could not list packages)" : "");
     toast(
       US.size ? `${US.size} candidate(s)${note}` : `Nothing worth hiding found${note}`,
       US.size ? "ok" : ""
@@ -331,7 +385,7 @@
     usShown = !usShown;
     $("usList").classList.toggle("u-hide", !(usShown));
     btn.classList.remove("u-hide");
-    btn.textContent = usShown ? "Hide list" : "Show list";
+    btn.textContent = usShown ? "Collapse" : "Show candidates";
   }
   function usPick(pkg) {
     const e = US.get(pkg); if (!e) return;
@@ -443,15 +497,18 @@
       "Stop hiding"))) return;
     btn.disabled = true;
     const r = await nm(`uid unblock ${shq(target)}`);
-    if (r.errno === 0) toast(`${target} unhidden`, "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    const still = ((r.stdout || "") + "\n" + (r.stderr || ""))
+      .split("\n").find(l => /stays hidden/.test(l));
+    if (r.errno === 0 && still) toast(still.replace(/^ok:\s*/, ""), "bad");
+    else if (r.errno === 0) toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${target} unhidden`, "ok");
+    else toast(failText(r), "bad");
     refreshBlocked();
   }
   async function saveOne(target, btn) {
     btn.disabled = true;
     const r = await nm(`uid block ${shq(target)}`);
-    if (r.errno === 0) toast(`${target} saved`, "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    if (r.errno === 0) toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${target} saved`, "ok");
+    else toast(failText(r), "bad");
     refreshBlocked();
   }
 

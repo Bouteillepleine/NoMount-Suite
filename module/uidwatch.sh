@@ -16,9 +16,15 @@ NMLOG_TAG=uidwatch
 [ -e "$NMDIR/disabled" ] && exit 0
 
 if [ "$3" = ".allowlist" ]; then
-    _follow_ksu || exit 0
+    if ! _follow_ksu; then
+        # A root grant still changes the conceal table when the DenyList is not followed.
+        nm_set_bin
+        [ -x "$BIN" ] && nmto 60 "$BIN" ghost sync >/dev/null 2>&1
+        exit 0
+    fi
 else
-    _has_entries "$NMDIR/uidhide" || _follow_ksu || _has_entries "$NMDIR/absorbed.list" || exit 0
+    _has_entries "$NMDIR/uidhide" || _follow_ksu || _has_entries "$NMDIR/uidhide.cache" \
+        || _has_entries "$NMDIR/absorbed.list" || exit 0
 fi
 
 nm_set_bin
@@ -67,6 +73,7 @@ trap '[ "$(cat "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"' EXIT INT TERM
 
 sleep 3
 _rounds=0
+_retry=0
 while :; do
 # Keep the lock's mtime current so its age measures how long this round has run,
 # not how long ago the pass started.
@@ -75,7 +82,7 @@ rm -f "$DIRTY" 2>/dev/null
 _cur=$(_uw_digest)
 if [ -z "$_cur" ] || [ "$_cur" != "$(cat "$DIGEST" 2>/dev/null)" ]; then
 _ok=1
-if _has_entries "$NMDIR/uidhide" || _follow_ksu; then
+if _has_entries "$NMDIR/uidhide" || _follow_ksu || _has_entries "$NMDIR/uidhide.cache"; then
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     if [ "$_urc" -eq 124 ]; then
@@ -108,8 +115,14 @@ fi
 _rounds=$((_rounds + 1))
 [ -e "$DIRTY" ] || break
 if [ "$_rounds" -ge 3 ]; then
-    nmlog "package changes kept arriving while the hide list was being re-applied; stopping after $_rounds passes - the next package event or boot picks up the rest"
+    nmlog "package changes kept arriving while the hide list was being re-applied; stopping after $_rounds passes and retrying in 30s"
+    _retry=30
     break
 fi
 done
+[ "$(cat "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"
+# A handler that lost the lock race after the last DIRTY test only left DIRTY behind.
+if [ -e "$DIRTY" ]; then
+    ( sleep "$_retry"; exec /system/bin/sh "$MODDIR/uidwatch.sh" w /data/system packages.list ) >/dev/null 2>&1 &
+fi
 exit 0

@@ -15,14 +15,16 @@ esac
 # nothing, and cannot be executed. Only the ones pointing into this module - a link to
 # something else was not ours to delete.
 for _nmd in /data/adb/ksu/bin /data/adb/ap/bin; do
-    [ -L "$_nmd/nm" ] || continue
-    case "$(readlink "$_nmd/nm" 2>/dev/null)" in
-        /data/adb/modules/meta-nomount/* | /data/adb/modules_update/meta-nomount/* | "$MODDIR"/*)
-            rm -f "$_nmd/nm" 2>/dev/null
-            ;;
-    esac
+    for _nmn in nm nomount; do
+        [ -L "$_nmd/$_nmn" ] || continue
+        case "$(readlink "$_nmd/$_nmn" 2>/dev/null)" in
+            /data/adb/modules/meta-nomount/* | /data/adb/modules_update/meta-nomount/* | "$MODDIR"/*)
+                rm -f "$_nmd/$_nmn" 2>/dev/null
+                ;;
+        esac
+    done
 done
-unset _nmd
+unset _nmd _nmn
 
 _bak=/data/adb/nomount.bak
 # Same gate as lib.sh's nmlog: the boot log always, /dev/kmsg only on request.
@@ -160,10 +162,14 @@ else
     # kept its state directory, with a reason ("the next boot retries it") that could
     # never come true. Keep the one thing that record is for, where an uninstalled module
     # cannot reach it, then wipe.
+    # Under /data/adb, not /data/local/tmp, where any app can stat a file named nomount. The
+    # header carries the reason, since boot.log goes with the directory below.
+    _ub=/data/adb/nomount-unfinished-binds.list
     if [ "${_wipe_ok:-1}" = 0 ] && [ -s /data/adb/nomount/binds.list ]; then
-        if cp -p /data/adb/nomount/binds.list \
-                /data/local/tmp/nomount-unfinished-binds.list 2>/dev/null; then
-            _nmlog "⚠ ${_keep_why:-state could not be stashed}; uninstalling anyway, and binds.list is at /data/local/tmp/nomount-unfinished-binds.list - those source files may still carry a ROM SELinux label"
+        if { echo "# NoMount uninstall could not undo these binds (${_keep_why:-state could not be stashed}); the source files may still carry a ROM SELinux label"
+             cat /data/adb/nomount/binds.list; } > "$_ub" 2>/dev/null; then
+            chmod 0600 "$_ub" 2>/dev/null
+            _nmlog "⚠ ${_keep_why:-state could not be stashed}; uninstalling anyway, and binds.list is at $_ub - those source files may still carry a ROM SELinux label"
         else
             _nmlog "⚠ ${_keep_why:-state could not be stashed}; uninstalling anyway, and binds.list could NOT be copied out - any source file still carrying a ROM label is unrecorded"
         fi

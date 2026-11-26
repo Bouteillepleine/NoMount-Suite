@@ -165,3 +165,31 @@ mod tests {
         p
     }
 }
+
+/// The one grammar every hand-edited list is read with: a leading byte-order mark is
+/// dropped, `#` starts a comment at the line start or after whitespace, and what is left
+/// is trimmed. Six readers each had their own, so a BOM or `entry # note` silently became
+/// part of the entry -- an app that was never hidden, an opt-out that was never honoured.
+pub fn list_entries(raw: &str) -> Vec<&str> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    raw.lines()
+        .filter_map(|l| {
+            let l = match l.find(" #").or_else(|| l.find("\t#")) {
+                Some(i) => &l[..i],
+                None => l,
+            };
+            let l = l.trim();
+            (!l.is_empty() && !l.starts_with('#')).then_some(l)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod list_tests {
+    #[test]
+    fn a_bom_and_inline_comments_are_not_part_of_an_entry() {
+        let raw = "\u{feff}com.android.vending # store\n# whole-line comment\n\n  /system/etc/hosts\t# adblock\nplain\n";
+        assert_eq!(super::list_entries(raw), vec!["com.android.vending", "/system/etc/hosts", "plain"]);
+        assert_eq!(super::list_entries("a#b\n"), vec!["a#b"], "a # inside a word is not a comment");
+    }
+}

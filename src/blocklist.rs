@@ -45,17 +45,31 @@ pub fn apk_scope() -> Result<Vec<u32>> {
 }
 
 /// The testable half: file contents and `installed` injected.
+///
+/// A name that matches no installed package is skipped, not fatal: an app that is not
+/// installed has nothing to hide from, and failing the whole list stopped every absorbed
+/// APK from being served once one listed app was uninstalled. An unreadable package list
+/// is still an Err, because then no name can be told apart from an uninstalled one.
 pub fn apk_scope_from(raw: &str, installed: &[(String, u32)]) -> Result<Vec<u32>> {
-    let spec = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join(",");
-    if spec.is_empty() {
+    let entries: Vec<&str> = crate::statefile::list_entries(raw);
+    if entries.is_empty() {
         return Ok(Vec::new());
     }
-    resolve_appid_list_in(&spec, installed)
+    if installed.is_empty() {
+        anyhow::bail!("the installed-package list could not be read, so no entry can be resolved");
+    }
+    let mut keep: Vec<&str> = Vec::new();
+    for e in entries {
+        if e.parse::<u32>().is_err() && expand(e, installed)?.is_empty() {
+            eprintln!("nomount: apkscope: {e} matches no installed package - ignored until one does");
+            continue;
+        }
+        keep.push(e);
+    }
+    if keep.is_empty() {
+        return Ok(Vec::new());
+    }
+    resolve_appid_list_in(&keep.join(","), installed)
 }
 
 /// The engine holds at most this many excluded appids per rule.
@@ -335,11 +349,7 @@ pub fn read_for_report() -> Result<Vec<String>> {
 
 fn parse_blocklist(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for line in raw.lines() {
-        let e = line.trim();
-        if e.is_empty() || e.starts_with('#') {
-            continue;
-        }
+    for e in crate::statefile::list_entries(raw) {
         if !out.iter().any(|x| x == e) {
             out.push(e.to_string());
         }
@@ -366,6 +376,10 @@ fn check_entry(e: &str) -> Result<()> {
             "{e:?} cannot be a hide-list entry (blank, a comment, or carrying a newline or tab) \
  - it would be dropped again on the next read"
         );
+    }
+    // ":" is the DenyList mirror's key prefix; a stored "ksu:pkg" resolved from that row.
+    if e.contains(':') {
+        anyhow::bail!("{e:?} cannot be a hide-list entry - no package name carries a ':'");
     }
     Ok(())
 }
@@ -469,7 +483,11 @@ fn cache_write(map: &BTreeMap<String, u32>) {
 }
 
 pub fn cache_put(entry: &str, uid: u32) {
-    let mut map = cache_read();
+    // Rewriting an unreadable mirror as one entry would drop every appid it records.
+    let Some(mut map) = cache_read_checked() else {
+        eprintln!("nomount: {CACHE_PATH} is unreadable - not recording {entry}");
+        return;
+    };
     if map.insert(entry.trim().to_string(), appid(uid)) != Some(appid(uid)) {
         cache_write(&map);
     }
@@ -490,8 +508,11 @@ pub const KSU_KEY_PREFIX: &str = "ksu:";
 
 fn conf_value(raw: &str, key: &str) -> Option<String> {
     raw.lines().find_map(|line| {
+        // `key = value` as well as `key=value`: the shell reader allows the spaces, and the
+        // two disagreeing turned one knob on for uidwatch and off for `uid apply`.
         line.trim()
             .strip_prefix(key)
+            .map(str::trim_start)
             .and_then(|r| r.strip_prefix('='))
             .map(|v| v.trim().to_string())
     })
@@ -632,7 +653,28 @@ mod tests {
     #[test]
     fn an_unresolvable_apkscope_is_an_error_not_silently_off() {
         use super::apk_scope_from;
-        assert!(apk_scope_from("com.not.installed\n", &pm()).is_err());
+        assert!(apk_scope_from("com.google.android.gms\n", &[]).is_err(), "no package list");
+        assert!(apk_scope_from("*[\n", &pm()).is_err(), "a malformed pattern");
+        let nine: String = (10001..=10009).map(|n| format!("{n}\n")).collect();
+        assert!(apk_scope_from(&nine, &pm()).is_err(), "over DENY_MAX");
+    }
+
+    #[test]
+    fn a_conf_key_reads_the_same_with_spaces_around_the_equals() {
+        assert_eq!(super::conf_value("follow_ksu_denylist = 1\n", "follow_ksu_denylist").as_deref(), Some("1"));
+        assert_eq!(super::conf_value("follow_ksu_denylist=0\n", "follow_ksu_denylist").as_deref(), Some("0"));
+        assert_eq!(super::conf_value("follow_ksu_denylist_x=1\n", "follow_ksu_denylist"), None);
+    }
+
+    #[test]
+    fn an_uninstalled_apkscope_entry_is_skipped_not_fatal() {
+        use super::apk_scope_from;
+        assert_eq!(
+            apk_scope_from("com.not.installed\ncom.google.android.gms\n", &pm()).expect("ok"),
+            vec![10397],
+            "the installed app is still excluded"
+        );
+        assert!(apk_scope_from("com.not.installed\n", &pm()).expect("ok").is_empty());
     }
 
     #[test]

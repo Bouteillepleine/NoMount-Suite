@@ -30,7 +30,7 @@
     /* content */
     --on:      #e4e8f2;
     --onv:     #aeb6c7;
-    --outl:    #78819a;
+    --outl:    #8b94ab;
     --outlv:   #2b3342;
     /* accent roles */
     --pri:     #a9c0ff;
@@ -101,7 +101,7 @@
   .brand { min-width: 0; flex: 1 1 auto; }
   .brand h1 {
     margin: 0; font-size: 21px; font-weight: 520; letter-spacing: -0.25px; line-height: 1.15;
-    white-space: nowrap; color: var(--on);
+    white-space: nowrap; color: var(--on); overflow: hidden; text-overflow: ellipsis;
   }
   .brand p {
     margin: 4px 0 0; font-size: 12.5px; color: var(--onv); font-family: var(--mono);
@@ -137,7 +137,7 @@
     padding: 17px 17px 16px; margin-bottom: 12px;
   }
   .card.out { background: transparent; border: 1px solid var(--outlv); }
-  .card-h { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .card-h { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; min-height: 48px; }
   .card-h h2 { margin: 0; font-size: 15.5px; font-weight: 520; letter-spacing: -0.1px; }
   .card-h .ic {
     width: 38px; height: 38px; border-radius: 13px; flex: none; padding: 9px;
@@ -257,7 +257,7 @@
     background: var(--sc-hi); padding: 12px 18px; border-radius: 16px;
     font-family: inherit; font-size: 13.5px; font-weight: 600;
     transition: transform .08s, background .2s, color .2s;
-    flex: 1; min-width: 120px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    flex: 1; min-width: 120px; min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   }
   .card.hero button.act { background: rgba(255,255,255,0.08); color: #dbe6ff; }
   button.act svg { width: 17px; height: 17px; }
@@ -332,7 +332,7 @@
   .frow details { margin-top: 9px; }
   .frow details > summary {
     cursor: pointer; font-size: 12px; color: var(--onv); list-style: none;
-    padding: 3px 0; user-select: none;
+    padding: 12px 0; user-select: none;
   }
   .frow details > summary::-webkit-details-marker { display: none; }
   .frow details > summary::before { content: "\25B8 "; }
@@ -434,7 +434,7 @@
   /* ---------- inputs ---------- */
   .uidbar { display: flex; flex-wrap: wrap; gap: 9px; }
   .uidbar input {
-    flex: 1 1 100%; min-width: 0; background: var(--sc-hi); border: 1px solid transparent;
+    flex: 1 1 100%; min-width: 0; background: var(--sc-hi); border: 1px solid var(--outl);
     color: var(--on); border-radius: 18px; padding: 13px 15px; font-size: 14px; outline: none;
     font-family: inherit;
   }
@@ -472,7 +472,7 @@
   }
   .seg-b {
     appearance: none; background: transparent; border: 0; border-left: 1px solid var(--outlv);
-    padding: 11px 7px; font: inherit; font-size: 12.5px; line-height: 1.15;
+    padding: 11px 7px; font: inherit; font-size: 12.5px; line-height: 1.15; min-height: 48px;
     color: var(--onv); cursor: pointer; transition: background .13s, color .13s;
   }
   .seg-b:first-child { border-left: 0; }
@@ -525,7 +525,7 @@
   .ndet { margin-top: 13px; }
   .ndet > summary {
     cursor: pointer; list-style: none; font-size: 12.5px; font-weight: 600;
-    color: var(--onv); padding: 7px 0;
+    color: var(--onv); padding: 12px 0; min-height: 48px; box-sizing: border-box;
   }
   .ndet > summary::-webkit-details-marker { display: none; }
   .ndet > summary::before {
@@ -564,13 +564,18 @@
   }
   .blk .bmid { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .blk .btop { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-  .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
+  .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+  .name .dim { color: var(--onv); opacity: .7; }
+  .tip[title] { cursor: help; }
   .blk .bs {
     flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--onv);
     font-variant-numeric: tabular-nums; font-family: var(--mono);
   }
   .blk .bcov { font-size: 11px; line-height: 1.4; color: var(--onv); }
   .blk.live    .bs { color: var(--sec); }
+  html[data-theme="light"] .blk.live .bs, html[data-theme="light"] .rch.r-qr { color: var(--on-sec-c); }
+  .bks { flex: 0 0 auto; font-size: 11px; color: var(--onv); padding: 4px 8px; border-radius: 10px;
+         background: var(--sc-hi); white-space: nowrap; }
   .blk.live    .dot { background: var(--sec); }
   .blk.pending .dot, .blk.drift .dot { background: var(--pri); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--pri); }
@@ -579,8 +584,10 @@
   .bx {
     flex: 0 0 auto; width: 38px; height: 38px; line-height: 36px; text-align: center;
     border: none; border-radius: 12px; cursor: pointer; font-size: 13px;
-    background: rgba(255,255,255,0.07); color: var(--onv);
+    background: rgba(255,255,255,0.07); color: var(--onv); position: relative;
   }
+  /* 48 px to the finger, 38 px to the eye. */
+  .bx::after { content: ""; position: absolute; inset: -5px; }
   .bx:hover { background: rgba(248,113,122,0.18); color: #ff8f8f; }
   .bx.save:hover { background: rgba(87,230,195,0.18); color: var(--sec); }
   .bx:disabled { opacity: 0.4; }
@@ -619,7 +626,7 @@
     box-shadow: var(--shadow);
     transition: .28s cubic-bezier(.2,.8,.2,1); max-width: 90vw; z-index: 80; text-align: center;
   }
-  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; cursor: pointer; }
   #toast.ok  { border-color: rgba(87,230,195,0.45); }
   #toast.bad { border-color: var(--infobd); }
 
@@ -637,7 +644,7 @@
   }
   @keyframes cfin { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
   .cfbox .cft { font-size: 19px; font-weight: 500; letter-spacing: -0.2px; }
-  .cfbox .cfb { font-size: 13px; line-height: 1.6; color: var(--onv); margin-top: 10px; }
+  .cfbox .cfb { font-size: 13px; line-height: 1.6; color: var(--onv); margin-top: 10px; white-space: pre-line; max-height: 50vh; overflow-y: auto; overflow-wrap: anywhere; }
   .cfbox .btns { margin-top: 20px; }
   .cfbox .btns .act { min-height: 48px; }
   .cfbox .btns #cfNo { flex: 1.4 1 0; }
@@ -761,7 +768,7 @@
     --sc-max:  #ffffff;
     --on:      #101725;
     --onv:     #515a70;
-    --outl:    #6d7689;
+    --outl:    #5c6579;
     --outlv:   #dde3ef;
     --pri:     #3f63e0;
     --on-pri:  #ffffff;

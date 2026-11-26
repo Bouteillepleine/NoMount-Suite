@@ -103,11 +103,7 @@ fn norm(p: &str) -> String {
 
 fn parse(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for line in raw.lines() {
-        let e = line.trim();
-        if e.is_empty() || e.starts_with('#') {
-            continue;
-        }
+    for e in crate::statefile::list_entries(raw) {
         let e = norm(e);
         if !out.contains(&e) {
             out.push(e);

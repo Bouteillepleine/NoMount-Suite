@@ -294,6 +294,8 @@ impl Report {
                 J::Arr(self.sections.iter().map(|x| J::s(x.slug())).collect()),
             ),
             ("verdict", J::s(self.verdict())),
+            // The WebUI compares this with the running boot before painting from a cache.
+            ("boot", J::s(crate::absorb::boot_id().unwrap_or_default())),
             (
                 "cache_kept_ts",
                 match self.cache_kept {
@@ -481,15 +483,30 @@ fn boot_epoch() -> Option<i64> {
 /// report with "not fully measured (4 checks)". Only kept while the cached report still
 /// describes this boot and this live state - a stale "clean" is worse than an honest
 /// "not measured".
+/// A not-measured row that this run's own context explains: the app seccomp filter the
+/// WebUI's shell carries. Any other one is news, and keeping an older report would bury it.
+fn is_context_row(c: &Check) -> bool {
+    c.evidence.starts_with("not run: seccomp mode")
+        || c.evidence.contains("killed by SIGSYS")
+        || c.evidence == "unchecked:seccomp-filtered"
+        || (c.name == "ghost cloak not verified"
+            && crate::audit::probe_blocked_reason().is_some())
+}
+
 fn cached_report_to_keep(r: &Report) -> Option<i64> {
     let cached = std::fs::read_to_string(HEALTH).unwrap_or_default();
     let t = r.tally();
+    let unexplained = r
+        .checks
+        .iter()
+        .any(|c| c.verdict == Verdict::Unmeasured && !is_context_row(c));
     keep_cached(
         !t.complete(),
         crate::audit::probe_blocked_reason().is_some(),
-        t.fail > 0 || t.reboot > 0,
+        t.fail > 0 || t.reboot > 0 || t.warn > 0 || unexplained,
         &cached,
         boot_epoch(),
+        crate::absorb::boot_id().as_deref(),
         &r.facts,
     )
 }
@@ -512,7 +529,7 @@ const KEEP_IGNORES: [&str; 1] = ["consistency"];
 
 /// Lines health.txt carries that are not fingerprint facts, so comparing them would
 /// compare a report against itself rather than against the live state.
-const KEEP_META: [&str; 3] = ["complete", "verdict", "ts"];
+const KEEP_META: [&str; 4] = ["complete", "verdict", "boot", "ts"];
 
 fn keep_cached(
     incomplete: bool,
@@ -520,6 +537,7 @@ fn keep_cached(
     live_found_fault: bool,
     cached: &str,
     boot_epoch: Option<i64>,
+    boot: Option<&str>,
     facts: &[Fact],
 ) -> Option<i64> {
     // A run that measured everything always wins, and a run that fell short for any
@@ -542,9 +560,13 @@ fn keep_cached(
         return None;
     }
     let ts: i64 = kv.get("ts")?.parse().ok()?;
+    // boot_id holds when the clock was behind at boot; ts covers reports written before it.
     // An unknown boot epoch reads as "do not know", never as "from this boot".
-    if ts < boot_epoch? {
-        return None;
+    match (kv.get("boot").copied(), boot) {
+        (Some(c), Some(b)) if c != b => return None,
+        (Some(_), Some(_)) => {}
+        _ if ts < boot_epoch? => return None,
+        _ => {}
     }
     // Compared over the UNION of both sides' keys, so a fact present on only one of them
     // is a mismatch: a cached report from a build that did not measure something cannot
@@ -563,7 +585,7 @@ fn keep_cached(
     Some(ts)
 }
 
-pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()> {
+pub fn run_check(plan: bool, device: bool, json: bool, write: bool, strict: bool) -> Result<()> {
     let want_device = device || !plan;
     // Serialise against the passes that change what we are about to measure. The boot script's
     // settle canary can run for ~450s while the detached T+45s reload/absorb pass is still
@@ -588,6 +610,9 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
                     if r.tally().complete() { "yes" } else { "no" }
                 ));
                 body.push_str(&format!("verdict={}\n", r.verdict()));
+                if let Some(b) = crate::absorb::boot_id() {
+                    body.push_str(&format!("boot={b}\n"));
+                }
                 body.push_str(&format!("ts={}\n", r.ts));
                 let _ = crate::statefile::write_atomic(HEALTH, body);
             }
@@ -600,8 +625,12 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
         print!("{}", r.text());
     }
 
-    if r.tally().open_failures() > 0 {
+    let t = r.tally();
+    if t.open_failures() > 0 {
         std::process::exit(1);
+    }
+    if strict && (t.warn > 0 || !t.complete()) {
+        std::process::exit(2);
     }
     Ok(())
 }
@@ -627,11 +656,11 @@ mod tests {
     fn a_run_that_could_not_measure_keeps_the_better_cached_report() {
         let f = facts5();
         // The case this exists for: filtered run, cached report complete and from this boot.
-        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), &f), Some(2000));
+        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), None, &f), Some(2000));
         // A complete run always writes, and so does an incomplete one whose gap is the
         // device rather than this process.
-        assert_eq!(keep_cached(false, true, false, CACHED_OK, Some(1000), &f), None);
-        assert_eq!(keep_cached(true, false, false, CACHED_OK, Some(1000), &f), None);
+        assert_eq!(keep_cached(false, true, false, CACHED_OK, Some(1000), None, &f), None);
+        assert_eq!(keep_cached(true, false, false, CACHED_OK, Some(1000), None, &f), None);
     }
 
     #[test]
@@ -639,26 +668,55 @@ mod tests {
         let f = facts5();
         // Stale "clean" is worse than honest "not measured": a report from before this
         // boot describes uids and rules that no longer exist.
-        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(3000), &f), None);
+        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(3000), None, &f), None);
         // An unreadable clock must not be read as "everything is from this boot".
-        assert_eq!(keep_cached(true, true, false, CACHED_OK, None, &f), None);
+        assert_eq!(keep_cached(true, true, false, CACHED_OK, None, None, &f), None);
         // Itself incomplete, or saying nothing about it: nothing to defer to.
         let no = CACHED_OK.replace("complete=yes", "complete=no");
-        assert_eq!(keep_cached(true, true, false, &no, Some(1000), &f), None);
+        assert_eq!(keep_cached(true, true, false, &no, Some(1000), None, &f), None);
         let absent = CACHED_OK.replace("complete=yes\n", "");
-        assert_eq!(keep_cached(true, true, false, &absent, Some(1000), &f), None);
-        assert_eq!(keep_cached(true, true, false, "", Some(1000), &f), None);
+        assert_eq!(keep_cached(true, true, false, &absent, Some(1000), None, &f), None);
+        assert_eq!(keep_cached(true, true, false, "", Some(1000), None, &f), None);
         // Any fact that moved means the measurement no longer describes what is live.
         for (k, v) in [("rules", "288"), ("blocked", "22"), ("modules", "4"), ("engine", "v35"), ("version", "1.3.208")] {
             let drifted: Vec<Fact> = f
                 .iter()
                 .map(|(fk, fv)| (fk.clone(), if fk == k { v.to_string() } else { fv.clone() }))
                 .collect();
-            assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), &drifted), None, "{k}");
+            assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), None, &drifted), None, "{k}");
         }
         // A fact the live run could not produce at all is not a match either.
         let short: Vec<Fact> = f.iter().filter(|(k, _)| k != "rules").cloned().collect();
-        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), &short), None);
+        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), None, &short), None);
+    }
+
+    #[test]
+    fn only_the_seccomp_context_lets_a_filtered_run_defer_to_the_cache() {
+        let filtered = Check::new(
+            Section::Device,
+            "a",
+            "a",
+            Verdict::Unmeasured,
+            "not run: seccomp mode 2 here, so this process cannot drop uid",
+        );
+        assert!(is_context_row(&filtered));
+        let other =
+            Check::new(Section::Device, "b", "b", Verdict::Unmeasured, "3 parent directory(ies) could not be read");
+        assert!(!is_context_row(&other), "news the live run measured must not be buried");
+    }
+
+    #[test]
+    fn boot_id_decides_freshness_when_both_sides_have_it() {
+        let f = facts5();
+        let this = CACHED_OK.replace("ts=2000", "boot=b1\nts=500");
+        // A clock that was behind at boot: ts predates the epoch, the boot is the same.
+        assert_eq!(keep_cached(true, true, false, &this, Some(1000), Some("b1"), &f), Some(500));
+        // The previous boot's report, ts inside this boot's wall-clock window.
+        let prev = CACHED_OK.replace("ts=2000", "boot=b0\nts=2000");
+        assert_eq!(keep_cached(true, true, false, &prev, Some(1000), Some("b1"), &f), None);
+        // No live boot_id: ts decides, as before.
+        assert_eq!(keep_cached(true, true, false, &prev, Some(1000), None, &f), Some(2000));
+        assert_eq!(keep_cached(true, true, false, &this, Some(1000), None, &f), None);
     }
 
     #[test]
@@ -671,14 +729,14 @@ mod tests {
         f.push(("mounts".to_string(), "1".to_string()));
         f.push(("mounts_foreign".to_string(), "0".to_string()));
         let cached = format!("{CACHED_OK}mounts=1\nmounts_foreign=0\n");
-        assert_eq!(keep_cached(true, true, false, &cached, Some(1000), &f), Some(2000));
+        assert_eq!(keep_cached(true, true, false, &cached, Some(1000), None, &f), Some(2000));
 
         for (k, v) in [("mounts", "2"), ("mounts_foreign", "1")] {
             let drifted: Vec<Fact> = f
                 .iter()
                 .map(|(fk, fv)| (fk.clone(), if fk == k { v.to_string() } else { fv.clone() }))
                 .collect();
-            assert_eq!(keep_cached(true, true, false, &cached, Some(1000), &drifted), None, "{k}");
+            assert_eq!(keep_cached(true, true, false, &cached, Some(1000), None, &drifted), None, "{k}");
         }
     }
 
@@ -687,8 +745,8 @@ mod tests {
         // Keeping the cached report throws the live one away whole, so a failure in a check
         // this run WAS able to make has to win over an older clean report.
         let f = facts5();
-        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), &f), Some(2000));
-        assert_eq!(keep_cached(true, true, true, CACHED_OK, Some(1000), &f), None);
+        assert_eq!(keep_cached(true, true, false, CACHED_OK, Some(1000), None, &f), Some(2000));
+        assert_eq!(keep_cached(true, true, true, CACHED_OK, Some(1000), None, &f), None);
     }
 
     #[test]
@@ -722,7 +780,7 @@ mod tests {
         let v = r(vec![c("a", Verdict::Reboot), c("b", Verdict::Warn)]).verdict();
         assert!(
             v.starts_with("2 findings worth reading"),
-            "the headline must count what the exit code counts (fail + reboot + warn): {v}"
+            "the headline counts fail + reboot + warn; the exit code only fail + reboot: {v}"
         );
         assert!(v.contains("need a reboot to finish"), "{v}");
 

@@ -162,6 +162,17 @@ impl Fingerprint {
                      see the injection",
                 )
                 .owner("the kernel engine"),
+            s if s.starts_with("unchecked:unreadable-as-app:") => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                s.to_string(),
+            )
+            .meaning(
+                "An app could stat an injected file but not read it, so its bytes were never \
+                 compared. If the stock file is app-readable, that refusal is itself a \
+                 difference an app can see; a module tree with the wrong SELinux label is the \
+                 usual cause.",
+            ),
             s if s.starts_with("unchecked") => mk(
                 "per-UID consistency canary",
                 Verdict::Unmeasured,
@@ -290,6 +301,11 @@ const PR_UNUSED: u32 = 3;
 /// falls back to the size answer rather than inventing a divergence, because an injected
 /// file whose stock counterpart is root-only is stock behaviour, not a tell.
 const PR_BYTES: u32 = 4;
+/// stat agreed but read() failed as the app: nothing was compared.
+const PR_NOREAD: u32 = 5;
+/// The app could stat it and its mode lets the app read it, root read the same bytes, and
+/// open() still failed: an app-visible break (the engine's backing open refused), not stock.
+const PR_NOOPEN: u32 = 6;
 
 /// Bytes of each sampled file folded on both sides. One page: enough to separate two files
 /// of equal length in every case this has to catch, cheap enough to do inside the probe
@@ -318,10 +334,6 @@ fn prefix_sum(bytes: &[u8]) -> u32 {
 /// on the uid (`nomount_is_uid_blocked(current_uid())`), so uid is the axis this canary
 /// is about, and `others_can_search_to` already keeps the sample to paths DAC lets an
 /// app reach.
-fn probe_app_uid(live_hidden: &[u32]) -> Option<u32> {
-    pick_probe_uid(&crate::blocklist::installed_packages()?, live_hidden)
-}
-
 fn pick_probe_uid(installed: &[(String, u32)], live_hidden: &[u32]) -> Option<u32> {
     // Compare appids, not raw uids: the same app in a work profile is u10_aNNN, a
     // different raw uid for the same appid, and the engine hides by normalised appid.
@@ -340,8 +352,10 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     let rows = crate::absorb::parse_mountinfo(&body);
     let roots = crate::absorb::fs_roots(&rows);
     let Ok(tracked) = crate::bind::tracked_result() else { return None };
-    let ours: std::collections::HashSet<std::path::PathBuf> =
-        tracked.into_iter().map(|(t, _)| t).collect();
+    // (target, source), as check_zero_mount matches: a module's own bind over a target the
+    // Suite also binds is foreign, and counting it as ours hid it from mounts_foreign.
+    let ours: std::collections::HashSet<(std::path::PathBuf, std::path::PathBuf)> =
+        tracked.into_iter().collect();
     let (mut total, mut by_design) = (0usize, 0usize);
     for r in &rows {
         let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
@@ -349,7 +363,7 @@ fn count_mounts_split() -> Option<(usize, usize)> {
             continue;
         }
         total += 1;
-        if ours.contains(&r.target)
+        if ours.contains(&(r.target.clone(), src.clone()))
             || crate::absorb::module_dir_of(&src)
                 .is_some_and(|d| crate::absorb::is_hook_framework(&d))
         {
@@ -434,6 +448,11 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
     let mut kept: Vec<&str> = Vec::new();
     for n in names.iter().take(SLOTS) {
         let (Ok(c), Ok(m)) = (std::ffi::CString::new(*n), fs::metadata(n)) else { continue };
+        // Only a regular file has bytes to compare, and opening a FIFO blocks forever --
+        // as root, here, holding the pass lock.
+        if !m.is_file() {
+            continue;
+        }
         let sum = {
             use std::io::Read;
             fs::File::open(n).ok().and_then(|f| {
@@ -468,10 +487,20 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
             let Some(want) = root_sums[i] else { continue };
             let fd = unsafe { libc::open(cpaths[i].as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             if fd < 0 {
+                // Refused by its own mode bits is what stock does too (/system/build.prop is
+                // 0600); refused despite them is the anomaly, and its bytes went unread.
+                let m = st.st_mode as u32;
+                let mode_allows = m & 0o004 != 0
+                    || (st.st_uid == probe_uid && m & 0o400 != 0)
+                    || (st.st_gid == probe_uid && m & 0o040 != 0);
+                if mode_allows {
+                    out[i] = PR_NOOPEN;
+                }
                 continue;
             }
             let mut buf = [0u8; PR_PREFIX];
             let mut got = 0usize;
+            let mut read_err = false;
             while got < PR_PREFIX {
                 let r = unsafe {
                     libc::read(
@@ -480,13 +509,19 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
                         PR_PREFIX - got,
                     )
                 };
-                if r <= 0 {
+                if r < 0 {
+                    read_err = true;
+                    break;
+                }
+                if r == 0 {
                     break;
                 }
                 got += r as usize;
             }
             unsafe { libc::close(fd) };
-            if prefix_sum(&buf[..got]) != want {
+            if read_err {
+                out[i] = PR_NOREAD;
+            } else if prefix_sum(&buf[..got]) != want {
                 out[i] = PR_BYTES;
             }
         }
@@ -503,6 +538,7 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
     }
 
     let mut checked = 0;
+    let mut unread: Option<String> = None;
     for (i, target) in kept.iter().enumerate().skip(1) {
         match answers[i] {
             PR_AGREE => checked += 1,
@@ -511,8 +547,16 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
                 return format!("mismatch:{target}(same size, different bytes for uid {probe_uid})")
             }
             PR_NOSTAT => return format!("mismatch:{target}(ENOENT for uid {probe_uid})"),
+            PR_NOOPEN => return format!("mismatch:{target}(open fails for uid {probe_uid})"),
+            PR_NOREAD => {
+                unread.get_or_insert_with(|| format!("{target}(uid {probe_uid})"));
+            }
             _ => {}
         }
+    }
+    // A measured divergence above outranks this; an unread file must not pass as "ok".
+    if let Some(t) = unread {
+        return format!("unchecked:unreadable-as-app:{t}");
     }
     if checked == 0 {
         "unchecked".to_string()
@@ -607,9 +651,15 @@ pub fn gather() -> Fingerprint {
     let engine = nm.version().map(|v| format!("v{v}")).unwrap_or_else(|_| "down".into());
     let listed = nm.list();
     let list = listed.as_deref().unwrap_or("").to_string();
-    let live_rules = crate::nm::parse_list(&list);
+    // Counted: a line the parser cannot read is not a rule that went away, so the count is
+    // unknown rather than short.
+    let (live_rules, unread) = crate::nm::parse_list_counted(&list);
     let counted = |k: crate::nm::LiveKind| -> Option<usize> {
-        listed.as_ref().ok().map(|_| live_rules.iter().filter(|r| r.kind == k).count())
+        listed
+            .as_ref()
+            .ok()
+            .filter(|_| unread == 0)
+            .map(|_| live_rules.iter().filter(|r| r.kind == k).count())
     };
     let rules = counted(crate::nm::LiveKind::Inject);
     let whiteouts = counted(crate::nm::LiveKind::Whiteout);
@@ -621,7 +671,14 @@ pub fn gather() -> Fingerprint {
     // Chosen from the live hide list so the canary never probes as an app we hide from:
     // that app is SUPPOSED to see something different, and measuring it would report the
     // engine working correctly as an inconsistency.
-    let probe_uid = live.as_ref().ok().and_then(|v| probe_app_uid(v));
+    // An unreadable hide list or package map is "could not tell who to probe as", not
+    // "every candidate is hidden".
+    let installed = crate::blocklist::installed_packages();
+    let probe_known = live.is_ok() && installed.is_some();
+    let probe_uid = match (&live, &installed) {
+        (Ok(v), Some(inst)) => pick_probe_uid(inst, v),
+        _ => None,
+    };
     let guard = if crate::mount::guard_tripped() { "tripped" } else { "armed" };
     let split = count_mounts_split();
     Fingerprint {
@@ -636,6 +693,8 @@ pub fn gather() -> Fingerprint {
         blocked,
         consistency: if listed.is_err() {
             "unchecked:engine-list-failed".to_string()
+        } else if !probe_known {
+            "unchecked:probe-uid-unknown".to_string()
         } else {
             consistency_probe(&live_rules, probe_uid)
         },
@@ -881,7 +940,7 @@ fn create_export_dir(out: &Path, private: bool, owner: Option<(u32, u32)>) -> st
 
 fn write_export_file(
     path: &Path,
-    content: &str,
+    content: &[u8],
     private: bool,
     owner: Option<(u32, u32)>,
 ) -> std::io::Result<()> {
@@ -896,7 +955,68 @@ fn write_export_file(
     if let Some((uid, gid)) = owner {
         std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
     }
-    f.write_all(content.as_bytes())
+    f.write_all(content)
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+        }
+    }
+    !c
+}
+
+/// A stored (uncompressed) zip of the files directly in `dir`. An issue takes a file, not a
+/// folder, and the phone that just had the problem has no zip tool. Timestamps are fixed at
+/// 1980-01-01, as in scripts/mkzip.py.
+fn stored_zip(dir: &Path) -> std::io::Result<Vec<u8>> {
+    let mut files: Vec<_> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+    let (mut out, mut central, mut count) = (Vec::new(), Vec::new(), 0u16);
+    for e in files {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let data = fs::read(e.path())?;
+        let (crc, size, nlen, off) =
+            (crc32(&data), data.len() as u32, name.len() as u16, out.len() as u32);
+        const TIME_DATE: [u8; 4] = [0, 0, 0x21, 0];
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&TIME_DATE);
+        for v in [crc, size, size] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&nlen.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0]);
+        central.extend_from_slice(&TIME_DATE);
+        for v in [crc, size, size] {
+            central.extend_from_slice(&v.to_le_bytes());
+        }
+        central.extend_from_slice(&nlen.to_le_bytes());
+        central.extend_from_slice(&[0; 12]);
+        central.extend_from_slice(&off.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+        count += 1;
+    }
+    let (cd_off, cd_len) = (out.len() as u32, central.len() as u32);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&cd_len.to_le_bytes());
+    out.extend_from_slice(&cd_off.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    Ok(out)
 }
 
 fn base_unusable(base: &Path) -> Option<String> {
@@ -952,7 +1072,9 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
 
     let nm = Nm::new();
     let write = |name: &str, content: &str| {
-        if let Err(e) = write_export_file(&Path::new(&out).join(name), content, private, owner) {
+        if let Err(e) =
+            write_export_file(&Path::new(&out).join(name), content.as_bytes(), private, owner)
+        {
             eprintln!("nomount: export: could not write {name}: {e} - this diagnostic is incomplete");
         }
     };
@@ -1022,8 +1144,9 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
             write(f, &c);
         }
     }
-    println!("exported to {out}");
-    if let Some(why) = public {
+    // Written into the bundle as well as printed: whoever reads the bundle has to be able
+    // to tell "withheld" from "absent on that device", and the WebUI keeps none of stdout.
+    let note = public.map(|why| {
         let left_out = if withheld.is_empty() {
             String::new()
         } else {
@@ -1032,13 +1155,27 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
                 withheld.join(", ")
             )
         };
-        println!(
-            "note: {left_out}{out} {why}, so the hide list was kept out of it: rules.txt UID \
-             suffixes, the check report's hide-list names, any package name left in blocklist \
+        format!(
+            "note: {left_out}{out} {why}, so the hide list was kept out of it: rules.txt UID, \
+             scope and excluded-app suffixes, the check report's hide-list names, any package name left in blocklist \
              and any /data/app path in the fingerprint, the rule list, the check report and \
              mountinfo were redacted in place. Pass a private path for the unredacted \
              bundle: nomount export /data/adb/nomount/report"
-        );
+        )
+    });
+    if let Some(n) = &note {
+        write("WITHHELD.txt", &format!("{n}\n"));
+    }
+    println!("exported to {out}");
+    let zip = format!("{out}.zip");
+    match stored_zip(Path::new(&out))
+        .and_then(|z| write_export_file(Path::new(&zip), &z, private, owner))
+    {
+        Ok(()) => println!("zip: {zip}"),
+        Err(e) => eprintln!("nomount: export: could not write {zip}: {e} - attach the folder's files"),
+    }
+    if let Some(n) = note {
+        println!("{n}");
     }
     Ok(())
 }
@@ -1067,7 +1204,7 @@ fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
 fn redact_rules_for_shared(rules: &str) -> String {
     rules
         .lines()
-        .map(|l| l.split(" [UID:").next().unwrap_or(l).trim_end())
+        .map(|l| crate::nm::split_markers(l).0.trim_end())
         .map(redact_app_paths)
         .collect::<Vec<_>>()
         .join("\n")
@@ -1121,6 +1258,27 @@ fn redact_app_paths(line: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+
+    #[test]
+    fn the_export_zip_is_a_valid_stored_archive() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926, "the standard CRC-32 check value");
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("b.txt"), b"second").unwrap();
+        fs::write(d.path().join("a.txt"), b"first file").unwrap();
+        let z = stored_zip(d.path()).unwrap();
+        assert_eq!(&z[..4], b"PK\x03\x04");
+        let eocd = &z[z.len() - 22..];
+        assert_eq!(&eocd[..4], b"PK\x05\x06");
+        assert_eq!(u16::from_le_bytes([eocd[10], eocd[11]]), 2, "two entries");
+        if let Ok(p) = std::env::var("NM_ZIP_TEST_OUT") {
+            fs::write(p, &z).unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1466,14 +1624,14 @@ rules=3
         let out = d.path().join("report").join("nm-diag-1");
         create_export_dir(&out, true, None).unwrap();
         let f = out.join("uidhide");
-        write_export_file(&f, "com.example.bank\n", true, None).unwrap();
+        write_export_file(&f, b"com.example.bank\n", true, None).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&out), 0o700, "the bundle folder must not be traversable by apps");
         assert_eq!(mode(out.parent().unwrap()), 0o700);
         assert_eq!(mode(&f), 0o600, "the bundle files must not be readable by apps");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
 
-        write_export_file(&f, "x", true, None).unwrap();
+        write_export_file(&f, b"x", true, None).unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "x", "a rewrite truncates");
     }
 
@@ -1488,7 +1646,7 @@ rules=3
         let out = pre.join("nm-report").join("nm-diag-1");
         create_export_dir(&out, true, Some(me)).unwrap();
         let f = out.join("rules.txt");
-        write_export_file(&f, "r\n", true, Some(me)).unwrap();
+        write_export_file(&f, b"r\n", true, Some(me)).unwrap();
         let md = |p: &Path| std::fs::metadata(p).unwrap();
         for p in [out.as_path(), out.parent().unwrap()] {
             assert_eq!(md(p).permissions().mode() & 0o777, 0o700, "{}", p.display());
@@ -1649,6 +1807,13 @@ rules=3
         assert!(!got.contains("com.mybank.app"), "{got}");
         assert!(got.ends_with('\n'), "a text file someone will cat keeps its newline: {got:?}");
         assert!(got.contains("(bytes differ)"), "the finding survives redaction: {got}");
+
+        let scoped = "/product/app/X/X.apk -> /data/adb/rvhc/x.apk \
+                      [SCOPE: 0-4294967295] [DENY: 10397,10471]\n";
+        let got = redact_rules_for_shared(scoped);
+        assert!(!got.contains("10397") && !got.contains("[DENY:"), "excluded apps leak: {got}");
+        assert!(!got.contains("[SCOPE:"), "{got}");
+        assert_eq!(got, "/product/app/X/X.apk -> /data/adb/rvhc/x.apk");
 
         let clean = "/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n";
         assert_eq!(redact_app_paths_doc(clean), clean);

@@ -48,8 +48,8 @@ fn main() -> Result<()> {
         Commands::Mount => mount::run_mount(),
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
-        Commands::Check { plan, device, json, write } => {
-            check::run_check(plan, device, json, write)
+        Commands::Check { plan, device, json, write, strict } => {
+            check::run_check(plan, device, json, write, strict)
         }
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),

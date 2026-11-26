@@ -16,6 +16,7 @@ pub struct Summary {
     pub cuids: usize,
     pub rejected: usize,
     pub rejected_uids: usize,
+    pub rejected_cuids: usize,
     pub rejected_examples: Vec<String>,
     pub dump_failed: bool,
     pub probe_failed: bool,
@@ -76,6 +77,13 @@ impl Summary {
                 "{} of {} uid(s)",
                 self.rejected_uids,
                 self.uids + self.rejected_uids
+            ));
+        }
+        if self.rejected_cuids > 0 {
+            parts.push(format!(
+                "{} of {} conceal uid(s)",
+                self.rejected_cuids,
+                self.cuids + self.rejected_cuids
             ));
         }
         if !parts.is_empty() {
@@ -144,12 +152,22 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
     }
     for u in users.iter().filter(|u| **u != 0) {
         for a in appids {
-            push(u * crate::blocklist::PER_USER_RANGE + a, &mut v);
+            if let Some(x) =
+                u.checked_mul(crate::blocklist::PER_USER_RANGE).and_then(|x| x.checked_add(*a))
+            {
+                push(x, &mut v);
+            }
         }
     }
     for u in users {
         for a in appids {
-            push(u * crate::blocklist::PER_USER_RANGE + a + SDKSANDBOX_OFF, &mut v);
+            if let Some(x) = u
+                .checked_mul(crate::blocklist::PER_USER_RANGE)
+                .and_then(|x| x.checked_add(*a))
+                .and_then(|x| x.checked_add(SDKSANDBOX_OFF))
+            {
+                push(x, &mut v);
+            }
         }
     }
     v
@@ -201,18 +219,15 @@ fn extra_paths() -> Option<Vec<String>> {
 pub const CONCEAL_PATH: &str = "/data/adb/nomount/uidconceal";
 
 fn parse_conceal(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_owned)
-        .collect()
+    crate::statefile::list_entries(raw).into_iter().map(str::to_owned).collect()
 }
 
 fn conceal_entries() -> Option<Vec<String>> {
     read_list(CONCEAL_PATH)
 }
 
-/// KernelSU's app-profile store. Every app that has been GRANTED ROOT is in here.
+/// KernelSU's app-profile store: EVERY app with a profile, root or not (a DenyList
+/// "umount modules" profile included). Only records with allow_su are root grants.
 pub const KSU_ALLOWLIST: &str = "/data/adb/ksu/.allowlist";
 
 /// Package-shaped ASCII runs in a binary blob.
@@ -260,15 +275,71 @@ fn package_names_in(blob: &[u8]) -> Vec<String> {
     out
 }
 
-/// Apps KernelSU has granted root, or an empty list when the store cannot be read.
+/// Apps KernelSU has granted root, or an empty list when that cannot be told.
 ///
 /// Empty on failure is right here: these are ADDED to the hand-maintained list, so a store
 /// we cannot read costs the automatic half and leaves the explicit half exactly as written.
+///
+/// Every name in the store used to be taken, which concealed each DenyList app (a profile,
+/// but no root) from itself: `getpriority(PRIO_USER, getuid())` answered ESRCH, which stock
+/// cannot. The kernel is asked per installed app; the records are a fallback.
 fn root_granted_packages() -> Vec<String> {
+    if let Some(installed) = crate::blocklist::installed_packages() {
+        let mut out = Vec::new();
+        let mut answered = false;
+        for (pkg, uid) in &installed {
+            match crate::ksu::uid_granted_root(*uid) {
+                Some(granted) => {
+                    answered = true;
+                    if granted {
+                        out.push(pkg.clone());
+                    }
+                }
+                None => break,
+            }
+        }
+        if answered {
+            return out;
+        }
+    }
     match std::fs::read(KSU_ALLOWLIST) {
-        Ok(b) => package_names_in(&b),
+        Ok(b) => root_records_in(&b),
         Err(_) => Vec::new(),
     }
+}
+
+const AL_MAGIC: u32 = 0x7f4b_5355;
+const AL_HDR: usize = 8;
+const AL_REC: usize = 784;
+const AL_KEY: usize = 4;
+const AL_KEY_LEN: usize = 256;
+const AL_ALLOW_SU: usize = 264;
+
+/// Root-granted keys from the store's records (uapi/app_profile.h: version, key[256],
+/// curr_uid, allow_su). A layout this build does not recognise yields nothing.
+fn root_records_in(blob: &[u8]) -> Vec<String> {
+    if blob.len() < AL_HDR
+        || !(blob.len() - AL_HDR).is_multiple_of(AL_REC)
+        || u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) != AL_MAGIC
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for r in blob[AL_HDR..].as_chunks::<AL_REC>().0 {
+        if r[AL_ALLOW_SU] == 0 {
+            continue;
+        }
+        let key = &r[AL_KEY..AL_KEY + AL_KEY_LEN];
+        let end = key.iter().position(|&b| b == 0).unwrap_or(key.len());
+        if let Ok(name) = std::str::from_utf8(&key[..end]) {
+            if package_names_in(name.as_bytes()).first().map(String::as_str) == Some(name)
+                && !out.iter().any(|o| o == name)
+            {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Entries that name a package this device does not have installed.
@@ -300,7 +371,8 @@ fn conceal_uids() -> Option<Vec<u32>> {
     // the getpriority UID-visibility oracle reopens on the manager's own running tasks.
     // Observed twice on the same device, 2026-11-08 and 2026-11-18. Ask the kernel which
     // appid holds manager status instead; KSUN, SukiSU and ReSukiSU all answer ('K', 10).
-    let manager = crate::ksu::manager_appid().filter(|a| *a != 0);
+    // Only an app appid: KernelSU answers a "no manager" sentinel otherwise (-1, 65535).
+    let manager = crate::ksu::manager_appid().filter(|a| (10_000..20_000).contains(a));
     if entries.is_empty() && root_granted_packages().is_empty() {
         return Some(match manager {
             Some(a) => expand_ghost_uids(&[a], &device_user_ids()),
@@ -416,65 +488,128 @@ fn absent_to(uid: u32, paths: &[PathBuf]) -> Option<Vec<bool>> {
     Some(buf.into_iter().map(|b| b == 1).collect())
 }
 
-fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
-    let mut first = true;
-    let mut chunk: Vec<&str> = Vec::new();
-    let mut len = 0usize;
+/// The kernel's ghost_rule_sane() (lkm/ghost.c), mirrored so a path it would refuse is
+/// never sent: one refused token fails the whole replace it rides in.
+pub(crate) const GH_RULE_LEN: usize = 192;
 
-    let flush = |chunk: &mut Vec<&str>, len: &mut usize, first: &mut bool, out: &mut Summary| {
-        if chunk.is_empty() {
-            return;
-        }
-        let replacing = *first;
-        let cmd = format!("{}{}{}", kind, if replacing { '=' } else { '+' }, chunk.join("\n"));
-        if nm.ghost_ctl(&cmd).is_ok() {
-            match kind {
-                'p' => out.paths += chunk.len(),
-                'c' => out.cuids += chunk.len(),
-                _ => out.uids += chunk.len(),
-            }
-        } else {
-            if replacing {
-                let _ = nm.ghost_ctl(&format!("{kind}-"));
-                match kind {
-                    'p' => out.paths = 0,
-                    'c' => out.cuids = 0,
-                    _ => out.uids = 0,
-                }
-            }
-            for it in chunk.iter() {
-                let one = format!("{}+{}", kind, it);
-                if nm.ghost_ctl(&one).is_ok() {
-                    match kind {
-                        'p' => out.paths += 1,
-                        _ => out.uids += 1,
-                    }
-                } else if kind == 'p' {
-                    out.rejected += 1;
-                    if out.rejected_examples.len() < 3 {
-                        out.rejected_examples.push((*it).to_string());
-                    }
-                } else {
-                    out.rejected_uids += 1;
-                }
-            }
-        }
-        *first = false;
-        chunk.clear();
-        *len = 0;
-    };
-
-    for it in items {
-        if len + it.len() + 1 > CTL_CHUNK && !chunk.is_empty() {
-            flush(&mut chunk, &mut len, &mut first, out);
-        }
-        len += it.len() + 1;
-        chunk.push(it.as_str());
+pub(crate) fn ghost_rule_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() >= GH_RULE_LEN || s.contains('\0') || s.contains('\n') {
+        return false;
     }
-    flush(&mut chunk, &mut len, &mut first, out);
+    if b.first() == Some(&b'@') {
+        return b.len() >= 2;
+    }
+    if b.len() < 6 || b[0] != b'/' || s.contains("//") {
+        return false;
+    }
+    let slashes = b.iter().filter(|&&c| c == b'/').count();
+    if b[b.len() - 1] == b'/' {
+        slashes >= 3
+    } else {
+        slashes >= 2
+    }
+}
 
-    if first {
+fn bump(out: &mut Summary, kind: char, n: usize) {
+    match kind {
+        'p' => out.paths += n,
+        'c' => out.cuids += n,
+        _ => out.uids += n,
+    }
+}
+
+fn chunks(items: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for it in items {
+        if !cur.is_empty() && cur.len() + it.len() + 1 > CTL_CHUNK {
+            v.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(it);
+    }
+    if !cur.is_empty() {
+        v.push(cur);
+    }
+    v
+}
+
+/// Replace the kernel's `kind` table with `items`, without ever leaving it emptier than
+/// either the old or the new set. One chunk goes as `=`, which the kernel validates and
+/// stages before it swaps. Anything larger, or a replace the kernel refuses, is added
+/// with `+` first and only then are the stale entries removed with `~`: clearing first
+/// opened the cloak for every `nm` spawn of the rebuild, on every sync.
+fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
+    let mut want: Vec<&str> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for it in items {
+        let ok = if kind == 'p' {
+            ghost_rule_ok(it)
+        } else {
+            it.parse::<u32>().map(|u| u != 0).unwrap_or(false)
+        };
+        if !ok {
+            if kind == 'p' {
+                out.rejected += 1;
+                if out.rejected_examples.len() < 3 {
+                    out.rejected_examples.push(it.clone());
+                }
+            } else if kind == 'c' {
+                out.rejected_cuids += 1;
+            } else {
+                out.rejected_uids += 1;
+            }
+            continue;
+        }
+        if seen.insert(it.as_str()) {
+            want.push(it.as_str());
+        }
+    }
+    if want.is_empty() {
         let _ = nm.ghost_ctl(&format!("{kind}-"));
+        return;
+    }
+    let parts = chunks(&want);
+    if parts.len() == 1 && nm.ghost_ctl(&format!("{kind}={}", parts[0])).is_ok() {
+        bump(out, kind, want.len());
+        return;
+    }
+    for part in &parts {
+        let n = part.split('\n').count();
+        if nm.ghost_ctl(&format!("{kind}+{part}")).is_ok() {
+            bump(out, kind, n);
+            continue;
+        }
+        for it in part.split('\n') {
+            if nm.ghost_ctl(&format!("{kind}+{it}")).is_ok() {
+                bump(out, kind, 1);
+            } else if kind == 'p' {
+                out.rejected += 1;
+                if out.rejected_examples.len() < 3 {
+                    out.rejected_examples.push(it.to_string());
+                }
+            } else if kind == 'c' {
+                out.rejected_cuids += 1;
+            } else {
+                out.rejected_uids += 1;
+            }
+        }
+    }
+    // Stale entries go last. An unreadable table leaves them in place: over-hiding until
+    // the next sync, never under-hiding.
+    let Ok(live) = nm.ghost_list() else { return };
+    let prefix = format!("{kind} ");
+    let stale: Vec<&str> = live
+        .lines()
+        .filter_map(|l| l.strip_prefix(prefix.as_str()))
+        .map(str::trim)
+        .filter(|e| !e.is_empty() && !seen.contains(e))
+        .collect();
+    for part in chunks(&stale) {
+        let _ = nm.ghost_ctl(&format!("{kind}~{part}"));
     }
 }
 
@@ -577,6 +712,8 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
 
 pub fn run_sync(verbose: bool) -> Result<()> {
     let nm = Nm::new();
+    // Outside a pass: a reload between its delete and re-add would be pushed as the set.
+    let _pass = crate::mount::pass_lock();
     match sync(&nm)? {
         None => {
             if verbose {
@@ -638,6 +775,7 @@ pub fn run_sync(verbose: bool) -> Result<()> {
 }
 
 pub fn sync_quietly(nm: &Nm) {
+    let _pass = crate::mount::pass_lock();
     if let Ok(Some(s)) = sync(nm) {
         if let Some(w) = s.warning() {
             eprintln!("nomount: {w}");
@@ -656,6 +794,33 @@ pub fn sync_after_pass(nm: &Nm) {
 
 #[cfg(test)]
 mod tests {
+
+    fn al_record(key: &str, uid: i32, allow_su: bool) -> Vec<u8> {
+        let mut r = vec![0u8; super::AL_REC];
+        r[0..4].copy_from_slice(&4u32.to_le_bytes());
+        r[4..4 + key.len()].copy_from_slice(key.as_bytes());
+        r[260..264].copy_from_slice(&uid.to_le_bytes());
+        r[264] = allow_su as u8;
+        r
+    }
+
+    /// A DenyList "umount modules" profile is a record with allow_su = 0. Taking it as a root
+    /// grant concealed the app from itself: getpriority on its own uid answered ESRCH.
+    #[test]
+    fn only_root_granted_records_are_root_grants() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&0x7f4b_5355u32.to_le_bytes());
+        blob.extend_from_slice(&4u32.to_le_bytes());
+        blob.extend(al_record("com.root.app", 10200, true));
+        blob.extend(al_record("com.denylisted.app", 10201, false));
+        blob.extend(al_record("$", 9999, false));
+        assert_eq!(super::root_records_in(&blob), vec!["com.root.app".to_string()]);
+
+        let mut bad_magic = blob.clone();
+        bad_magic[0] ^= 0xff;
+        assert!(super::root_records_in(&bad_magic).is_empty(), "unknown store: conceal nothing");
+        assert!(super::root_records_in(&blob[..blob.len() - 1]).is_empty(), "unknown layout");
+    }
 
     #[test]
     fn a_rebuilt_manager_is_concealed_by_grant_and_its_dead_name_is_reported() {
@@ -889,6 +1054,33 @@ not-a-path -> /q
         assert!(out.contains(&10_123) && out.contains(&10_471), "both appids survive");
         assert!(out.contains(&20_123) && out.contains(&20_471), "and their sdksandbox uids");
         assert_eq!(out.len(), out.iter().collect::<std::collections::HashSet<_>>().len());
+    }
+
+    /// Pinned against the kernel's ghost_rule_sane(): any path it refuses fails the whole
+    /// replace it rides in, so Rust must refuse exactly the same set.
+    #[test]
+    fn ghost_rule_ok_matches_the_kernel() {
+        for ok in ["/dev/socket/adbd", "/system/etc/a", "/data/adb/x/", "@jdwp-control", "@x"] {
+            assert!(ghost_rule_ok(ok), "{ok}");
+        }
+        let long = format!("/system/etc/{}", "x".repeat(180));
+        for bad in ["/sbin", "/su", "/dev/", "/debug_ramdisk", "/dev//socket", "@", "rel/a/b", "/a/b/c\0d"] {
+            assert!(!ghost_rule_ok(bad), "{bad}");
+        }
+        assert!(!ghost_rule_ok(&long), "{} bytes", long.len());
+        assert!(ghost_rule_ok(&long[..GH_RULE_LEN - 1]));
+    }
+
+    #[test]
+    fn chunks_never_exceed_the_ctl_size_and_keep_every_item() {
+        let items: Vec<String> = (0..500).map(|i| format!("/system/etc/many/{i:04}-{}", "y".repeat(60))).collect();
+        let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let parts = chunks(&refs);
+        assert!(parts.len() > 1);
+        assert!(parts.iter().all(|p| p.len() <= CTL_CHUNK), "a chunk over the limit");
+        let back: Vec<&str> = parts.iter().flat_map(|p| p.split('\n')).collect();
+        assert_eq!(back, refs);
+        assert!(chunks(&[]).is_empty());
     }
 
     #[test]

@@ -69,6 +69,131 @@ enum GhostSeen {
     Unknown,
 }
 
+#[derive(Default)]
+struct GhostSample {
+    attempted: usize,
+    // Cloak-only entries that do not exist even for root: left out, not counted as unprobed.
+    no_control: usize,
+    unknown: usize,
+    absent: usize,
+    own_absent: usize,
+    visible: Vec<String>,
+    leaked: Vec<String>,
+}
+
+fn ghost_sample_findings(
+    s: &GhostSample,
+    who: &str,
+    blocked: impl FnOnce() -> Option<String>,
+) -> Vec<Finding> {
+    let mut f = Vec::new();
+    let probed = s.attempted - s.no_control;
+    let left_out = match s.no_control {
+        0 => String::new(),
+        1 => " 1 listed entry exists for no one here, root included, so it proves nothing and \
+              was left out."
+            .to_string(),
+        n => format!(
+            " {n} listed entries exist for no one here, root included, so they prove nothing \
+             and were left out."
+        ),
+    };
+    let name = |v: &[String]| v.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if !s.visible.is_empty() {
+        f.push(Finding {
+            level: Level::Error,
+            check: "ghost cloak over-reaches",
+            detail: format!(
+                "{} of {probed} sampled path(s) are still visible to {who}: they answer \
+                 \"exists\" and \"does not exist\" at once, which is louder than the leak this \
+                 closes. Re-run the mount pass: {}",
+                s.visible.len(),
+                name(&s.visible)
+            ),
+        });
+    }
+    if !s.leaked.is_empty() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "ghost cloak compiled in but not effective",
+            detail: format!(
+                "{} of {probed} sampled path(s) hide from `stat` but still leak their label; \
+                 the guards are compiled in and not firing on this kernel: {}",
+                s.leaked.len(),
+                name(&s.leaked)
+            ),
+        });
+    }
+    let clean = s.visible.is_empty() && s.leaked.is_empty();
+    if s.unknown > 0 && !clean {
+        f.push(Finding {
+            level: Level::Unmeasured,
+            check: "ghost cloak only partly sampled",
+            detail: format!(
+                "{} of {probed} sampled path(s) could not be probed at all, so the finding(s) \
+                 above speak for {} path(s), not the whole sample",
+                s.unknown,
+                probed - s.unknown
+            ),
+        });
+    }
+    if !clean {
+        return f;
+    }
+    if s.absent == 0 && s.unknown > 0 {
+        // Appended as its own sentence, not folded into the parenthesis: nesting it there made
+        // the one line that has to be read unreadable.
+        let why = blocked().map(|r| format!(" {r}")).unwrap_or_default();
+        f.push(Finding {
+            level: Level::Unmeasured,
+            check: "ghost cloak not verified",
+            detail: format!(
+                "none of the {probed} sampled path(s) could be probed (the test process could \
+                 not run), so the cloak was not tested on this kernel. This is not a pass.{why}"
+            ),
+        });
+    } else if s.own_absent == 0 {
+        f.push(Finding {
+            level: Level::Unmeasured,
+            check: "ghost cloak coverage not tested",
+            detail: if s.absent > 0 {
+                format!(
+                    "every sampled path ({}) is one the engine already hides from {who}, so the \
+                     cloak's own coverage was not tested: none of its paths that no rule covers \
+                     could be checked. This is not a pass.{left_out}",
+                    s.absent
+                )
+            } else {
+                format!(
+                    "none of the cloak's own paths could be checked on this device, so its \
+                     coverage was not tested. This is not a pass.{left_out}"
+                )
+            },
+        });
+    } else if s.unknown > 0 {
+        f.push(Finding {
+            level: Level::Unmeasured,
+            check: "ghost cloak only partly verified",
+            detail: format!(
+                "{} of {probed} sampled path(s) look exactly like paths that never existed, to \
+                 {who}, but {} could not be probed: not a complete answer.{left_out}",
+                s.absent, s.unknown
+            ),
+        });
+    } else {
+        f.push(Finding {
+            level: Level::Info,
+            check: "ghost cloak verified on this kernel",
+            detail: format!(
+                "{} of {probed} sampled hidden path(s) look exactly like paths that never \
+                 existed, to {who}. Measured, not assumed.{left_out}",
+                s.absent
+            ),
+        });
+    }
+    f
+}
+
 fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     use std::os::unix::ffi::OsStrExt;
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -1544,17 +1669,76 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..17).contains(&engine_v) {
+    if live_ok
+        && !hidden_apps.is_empty()
+        && pm_rules > 0
+        && (crate::nm::caps::PM_REGISTERED_EXEMPT..crate::nm::caps::PUBLIC_ON_READ_PATHS)
+            .contains(&engine_v)
+    {
         f.push(Finding {
             level: Level::Warn,
             check: "engine strips the opt-out from a replaced PM-published file",
             detail: format!(
                 "engine v{engine_v} serves stock bytes to your {} hidden app(s) for any rule that \
                  REPLACES a ROM file, while Android advertises the module's version for it. \
-                 Rebuild the kernel from kbuild@hookless >= 17.",
-                hidden_apps.len()
+                 Rebuild the kernel from kbuild@hookless >= {}.",
+                hidden_apps.len(),
+                crate::nm::caps::PUBLIC_ON_READ_PATHS
             ),
         });
+    }
+
+    // Absorb never serves an app's patched APK unscoped, so a list it cannot resolve, or an
+    // engine without per-rule scopes, leaves every absorbed APK on the stock file. Until
+    // now only a boot.log line said so.
+    if std::path::Path::new(crate::blocklist::APKSCOPE_PATH).exists() {
+        match crate::blocklist::apk_scope() {
+            Err(e) => f.push(Finding {
+                level: Level::Warn,
+                check: "apkscope cannot be resolved",
+                detail: format!(
+                    "{e:#}. Absorbed APKs are not served until it resolves, so the apps they \
+                     patch run the stock file."
+                ),
+            }),
+            Ok(deny) if !deny.is_empty() && live_ok && engine_v < crate::nm::caps::UID_SCOPE => {
+                f.push(Finding {
+                    level: Level::Warn,
+                    check: "engine too old for apkscope",
+                    detail: format!(
+                        "engine v{engine_v}: apkscope needs per-rule uid scopes (v{}), so \
+                         absorbed APKs are not served. Update the kernel, or empty apkscope.",
+                        crate::nm::caps::UID_SCOPE
+                    ),
+                })
+            }
+            Ok(_) => {}
+        }
+    }
+
+    // An absent cloak used to get no row at all, so a kernel built from hookless/ alone
+    // read exactly like one with both cloaks. Say so instead of staying silent.
+    if live_ok && engine_v >= crate::nm::caps::GHOST_CONTROL_PLANE {
+        if nm.ghost_present() == Some(false) {
+            f.push(Finding {
+                level: Level::Info,
+                check: "existence cloak not in this kernel",
+                detail: "this kernel has no _ghost patches, so an app on the hide list is kept \
+                         from injected paths by the engine alone: syscalls that never reach the \
+                         engine's checks (O_PATH opens, readlink, mkdir, access for write) still \
+                         answer as if those paths exist."
+                    .to_string(),
+            });
+        }
+        if nm.pathhide_present() == Some(false) {
+            f.push(Finding {
+                level: Level::Info,
+                check: "maps cloak not in this kernel",
+                detail: "this kernel has no pathhide patches, so the root stack's own files under \
+                         /data/adb stay visible in an app's /proc/<pid>/maps, smaps and pagemap."
+                    .to_string(),
+            });
+        }
     }
 
     if live_ok && engine_v >= crate::nm::caps::GHOST_CONTROL_PLANE && nm.ghost_present() != Some(false) {
@@ -1585,100 +1769,49 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             }
             if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
                 const SAMPLE: usize = 16;
-                let attempted = gpaths.len().min(SAMPLE);
-                let mut visible: Vec<&PathBuf> = Vec::new();
-                let mut leaked: Vec<&PathBuf> = Vec::new();
-                let mut absent = 0usize;
-                let mut unknown = 0usize;
-                for p in gpaths.iter().take(SAMPLE) {
+                // An engine-injected path is absent for a hidden uid with or without the
+                // cloak, so sampling only those could never fail. Paths no engine rule covers
+                // go first: they are the cloak's own work.
+                let engine_targets: HashSet<PathBuf> = nm
+                    .list()
+                    .map(|l| crate::nm::parse_list(&l).into_iter().map(|r| r.target).collect())
+                    .unwrap_or_default();
+                let mut order: Vec<&PathBuf> =
+                    gpaths.iter().filter(|p| !engine_targets.contains(*p)).collect();
+                order.extend(gpaths.iter().filter(|p| engine_targets.contains(*p)));
+                let mut sample = GhostSample {
+                    attempted: order.len().min(SAMPLE),
+                    ..GhostSample::default()
+                };
+                for p in order.into_iter().take(SAMPLE) {
+                    let own = !engine_targets.contains(p);
+                    // The control: an entry root cannot see either (a match pattern such as
+                    // `/adb/modules/`) is absent for everyone and proves nothing about the cloak.
+                    if own {
+                        match std::fs::symlink_metadata(p) {
+                            Ok(_) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                sample.no_control += 1;
+                                continue;
+                            }
+                            Err(_) => {
+                                sample.unknown += 1;
+                                continue;
+                            }
+                        }
+                    }
                     match ghost_seen_by(uid, p) {
-                        GhostSeen::Visible => visible.push(p),
-                        GhostSeen::XattrLeak => leaked.push(p),
-                        GhostSeen::Absent => absent += 1,
-                        GhostSeen::Unknown => unknown += 1,
+                        GhostSeen::Visible => sample.visible.push(p.display().to_string()),
+                        GhostSeen::XattrLeak => sample.leaked.push(p.display().to_string()),
+                        GhostSeen::Absent => {
+                            sample.absent += 1;
+                            sample.own_absent += usize::from(own);
+                        }
+                        GhostSeen::Unknown => sample.unknown += 1,
                     }
                 }
-                let checked = attempted;
-                let name = |v: &[&PathBuf]| -> String {
-                    v.iter().take(3).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-                };
                 let who = hidden_uid_label(uid, crate::blocklist::redact_hide_list());
-                if !visible.is_empty() {
-                    f.push(Finding {
-                        level: Level::Error,
-                        check: "ghost cloak over-reaches",
-                        detail: format!(
-                            "{} of {checked} sampled path(s) are still visible to {who}: they \
-                 answer \"exists\" and \"does not exist\" at once, which is louder than the leak \
-                 this closes. Re-run the mount pass: {}",
-                            visible.len(),
-                            name(&visible)
-                        ),
-                    });
-                }
-                if !leaked.is_empty() {
-                    f.push(Finding {
-                        level: Level::Warn,
-                        check: "ghost cloak compiled in but not effective",
-                        detail: format!(
-                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label; \
-                 the guards are compiled in and not firing on this kernel: {}",
-                            leaked.len(),
-                            name(&leaked)
-                        ),
-                    });
-                }
-                if unknown > 0 && !(visible.is_empty() && leaked.is_empty()) {
-                    f.push(Finding {
-                        level: Level::Unmeasured,
-                        check: "ghost cloak only partly sampled",
-                        detail: format!(
-                            "{unknown} of {attempted} sampled path(s) could not be probed at \
-                             all, so the finding(s) above speak for {} path(s), not the whole \
-                             sample",
-                            attempted - unknown
-                        ),
-                    });
-                }
-                if visible.is_empty() && leaked.is_empty() && absent == 0 {
-                    f.push(Finding {
-                        level: Level::Unmeasured,
-                        check: "ghost cloak not verified",
-                        detail: {
-                            // Appended as its own sentence, not folded into the parenthesis:
-                            // nesting it there made the one line that has to be read unreadable.
-                            let why = crate::audit::probe_blocked_reason()
-                                .map(|r| format!(" {r}"))
-                                .unwrap_or_default();
-                            format!(
-                                "none of the {attempted} sampled path(s) could be probed (the test \
-             process could not run), so the cloak was not tested on this kernel. This is not a \
-             pass.{why}"
-                            )
-                        },
-                    });
-                } else if visible.is_empty() && leaked.is_empty() {
-                    f.push(Finding {
-                        level: if unknown > 0 { Level::Unmeasured } else { Level::Info },
-                        check: if unknown > 0 {
-                            "ghost cloak only partly verified"
-                        } else {
-                            "ghost cloak verified on this kernel"
-                        },
-                        detail: if unknown > 0 {
-                            format!(
-                                "{absent} of {attempted} sampled path(s) look exactly like paths that never \
-             existed, to {who}, but {unknown} could not be probed: not a complete answer"
-                            )
-                        } else {
-                            format!(
-                                "{absent} of {} sampled hidden path(s) look exactly like paths that never \
-             existed, to {who}. Measured, not assumed.",
-                                gpaths.len()
-                            )
-                        },
-                    });
-                }
+                f.extend(ghost_sample_findings(&sample, &who, crate::audit::probe_blocked_reason));
             } else {
                 let nothing_hidden = hidden_apps.is_empty() && !hide_list_unreadable;
                 // Live rules count, not just the plan: an injection absorbed from another module
@@ -1966,6 +2099,63 @@ mod tests {
 
     use super::*;
     use crate::nm::LiveKind;
+
+    fn sample(attempted: usize, no_control: usize, unknown: usize, absent: usize, own: usize) -> GhostSample {
+        GhostSample { attempted, no_control, unknown, absent, own_absent: own, ..GhostSample::default() }
+    }
+
+    fn rows(s: &GhostSample) -> Vec<(Level, &'static str, String)> {
+        ghost_sample_findings(s, "hidden uid 10213", || Some("blocked".to_string()))
+            .into_iter()
+            .map(|f| (f.level, f.check, f.detail))
+            .collect()
+    }
+
+    #[test]
+    fn a_ghost_entry_root_cannot_see_is_left_out_not_unprobed() {
+        // The OP15 default list: two engine paths, /dev/socket/adbd, and the pattern
+        // /adb/modules/ that exists for no one. It read "only partly verified" before.
+        let r = rows(&sample(4, 1, 0, 3, 1));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Level::Info);
+        assert_eq!(r[0].1, "ghost cloak verified on this kernel");
+        assert!(r[0].2.starts_with("3 of 3 sampled"), "{}", r[0].2);
+        assert!(r[0].2.contains("1 listed entry exists for no one here"), "{}", r[0].2);
+    }
+
+    #[test]
+    fn only_engine_paths_left_after_the_control_is_still_untested_coverage() {
+        let r = rows(&sample(3, 1, 0, 2, 0));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Level::Unmeasured);
+        assert_eq!(r[0].1, "ghost cloak coverage not tested");
+        let r = rows(&sample(1, 1, 0, 0, 0));
+        assert_eq!(r[0].0, Level::Unmeasured);
+        assert_eq!(r[0].1, "ghost cloak coverage not tested");
+        assert!(r[0].2.starts_with("none of the cloak's own paths"), "{}", r[0].2);
+    }
+
+    #[test]
+    fn an_unprobed_sample_still_keeps_the_report_incomplete() {
+        let r = rows(&sample(4, 1, 1, 2, 1));
+        assert_eq!(r[0].0, Level::Unmeasured);
+        assert_eq!(r[0].1, "ghost cloak only partly verified");
+        assert!(r[0].2.starts_with("2 of 3 sampled"), "{}", r[0].2);
+        let r = rows(&sample(2, 0, 2, 0, 0));
+        assert_eq!(r[0].0, Level::Unmeasured);
+        assert_eq!(r[0].1, "ghost cloak not verified");
+        assert!(r[0].2.ends_with(" blocked"), "{}", r[0].2);
+    }
+
+    #[test]
+    fn a_visible_path_is_an_error_and_suppresses_the_clean_rows() {
+        let mut s = sample(3, 0, 1, 1, 1);
+        s.visible.push("/product/x".to_string());
+        let r = rows(&s);
+        let checks: Vec<&str> = r.iter().map(|x| x.1).collect();
+        assert_eq!(checks, ["ghost cloak over-reaches", "ghost cloak only partly sampled"]);
+        assert_eq!(r[0].0, Level::Error);
+    }
 
     #[test]
     fn only_the_silently_broken_kinds_are_loud() {

@@ -80,7 +80,7 @@ fi
 # trap stays as the safety net for the paths that exit before reaching this.
 nm_notify_mounted
 
-if command -v ksud >/dev/null 2>&1; then
+{
     _nmods=0
     if [ ! -e "$NMDIR/disabled" ]; then
     nm_rule_counts
@@ -106,18 +106,13 @@ if command -v ksud >/dev/null 2>&1; then
     elif [ "${_mrc:-0}" -ne 0 ]; then
         _desc="ℹ️ mount pass unfinished (exit $_mrc) - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _desc="✅ served, rule table unreadable"
+        _desc="ℹ️ served, rule table unreadable"
     elif [ "${_rules:-0}" = 0 ]; then
         _desc="ℹ️ ran, no module had files to serve"
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi
-    # The one blocking call in the boot set that had no timeout. It is a description
-    # card; it is never worth hanging a boot for. `env` because nmto execs "$@", so a
-    # VAR=val prefix would be taken as the command name.
-    nmto 10 env KSU_MODULE=meta-nomount ksud module config set --temp \
-        override.description "$_desc" >/dev/null 2>&1 \
-        || nmlog "⚠ could not write the module description card (ksud slow or refused)"
-fi
+    nm_card "$_desc" || nmlog "⚠ could not write the module description card (manager slow or refused)"
+}
 
 exit 0

@@ -38,6 +38,12 @@
     const dot = $("dot");
     const wasLive = ENGINE_LIVE;
     ENGINE_LIVE = d.ok;
+    const e0 = d.err || "";
+    ENGINE_STATE = d.ok ? "live"
+      : /socket was denied/.test(e0) ? "denied"
+      : /no NoMount engine/.test(e0) ? "absent"
+      : /cannot open the NoMount netlink socket/.test(e0) ? "unreachable"
+      : "error";
     paintHealthLine(CHECK);
     if (wasLive !== d.ok) {
       if (!CHECK_RUNNING) renderCheck(CHECK);
@@ -53,13 +59,36 @@
         $("substate").textContent =
           "SELinux denied this page the netlink socket, so the engine could not answer. " +
           "Injections may well be live - run `nomount check` from a terminal to be sure.";
+      } else if (/no NoMount engine/.test(e) && (await zipVariant()) === "lkm") {
+        if (gen !== STATUS_GEN) return 0;
+        // The LKM zip carries the engine as a module, so the kernel is not the thing to
+        // replace: the module did not load on it.
+        $("state").textContent = "Engine module not loaded";
+        $("substate").textContent =
+          "the NoMount module did not load on this kernel, so nothing is being injected. " +
+          "Get the LKM release that matches this kernel, or put a nomount.ko built for it " +
+          "at /data/adb/nomount/nomount.ko, then reboot. boot.log says which KMI was tried.";
       } else if (/no NoMount engine/.test(e)) {
         $("state").textContent = "No kernel driver";
         $("substate").textContent =
-          "this kernel was not built with NoMount. Flash one that was, then reboot. " +
+          "this kernel was not built with NoMount. Flash one that was, or the " +
+          "01_NoMount-Module-LKM zip, then reboot. " +
           "Nothing is being injected. Prebuilt OnePlus kernels: " +
           "github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases · " +
           "source: github.com/Bouteillepleine/NoMount-Suite";
+      } else if (/ended early|list is incomplete/.test(e)) {
+        $("state").textContent = "Rule list incomplete";
+        $("substate").textContent =
+          "the engine's rule list was cut off mid-read (rules were changing), so its state is " +
+          "unknown, not missing. Press refresh to ask again.";
+      } else if (/did not answer/.test(e)) {
+        $("state").textContent = "Engine slow to answer";
+        $("substate").textContent =
+          "the rule list timed out, so its state is unknown. Press refresh to ask again.";
+      } else if (/no webui env/.test(e)) {
+        $("state").textContent = "No root manager";
+        $("substate").textContent =
+          "this page only works inside a root manager's WebUI, which runs its commands.";
       } else if (/cannot open the NoMount netlink socket/.test(e)) {
         $("state").textContent = "Engine unreachable";
         $("substate").textContent =
@@ -80,7 +109,7 @@
     if (GUARD_TRIPPED === true) {
       $("state").textContent = "Disabled";
       $("substate").textContent =
-        "the bootloop guard tripped. Re-arm it in Bootloop guard below, then reboot";
+        "the bootloop guard tripped. " + GUARD_HINT;
       dot.className = "dot info";
       return d.rules;
     }
@@ -88,8 +117,13 @@
     if (d.rules > 0) {
       let pending = 0;
       try {
+        // As sets: absorbed rules and durable whiteouts are live but not planned, and a
+        // count comparison let them hide the same number of unserved planned files.
         const p = await planByModule();
-        if (p) pending = Math.max(0, p.expectLive - d.rules);
+        if (p) {
+          const live = new Set(d.lines.map(vpath));
+          pending = [...p.planned].filter(function (t) { return !live.has(t); }).length;
+        }
       } catch (e) {  }
       if (gen !== STATUS_GEN) return d.rules;
       // The hero used to paint green from the rule count alone, so it read "Active · modules
@@ -105,7 +139,8 @@
       }
       $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
                                               : "modules injected";
-      dot.className = pending > 0 ? "dot info" : "dot ok";
+      // Green means measured and nothing to look at; a finding is attention, not clean.
+      dot.className = pending > 0 || attn > 0 ? "dot info" : "dot ok";
       return d.rules;
     }
     let ships = -1, planned = -1;
@@ -167,6 +202,7 @@
         'case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; ' +
         'q fp "getprop ro.build.fingerprint"; ' +
         'q se "getenforce"; ' +
+        'q bootid "cat /proc/sys/kernel/random/boot_id"; ' +
         'echo "done=1";'
       );
       const kv = {};
@@ -217,8 +253,21 @@
     // `ourBinds` already answers the question the arm is about: it is parsed from the
     // zero-mount check's own "N module mount(s) visible" evidence, and that check measured
     // the app-visible mount table. So the branch below tags on `ourBinds` alone.
-    const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
-    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
+    // A report from a previous boot describes mounts that may be gone or new, and a report
+    // with no plan section never looked at other namespaces or unabsorbed module mounts:
+    // neither can say "clean".
+    const stale = !!(CHECK && CHECK.boot && kv.bootid && kv.bootid !== "?" && CHECK.boot !== kv.bootid);
+    const planRan = !!(CHECK && (CHECK.sections || []).indexOf("plan") >= 0);
+    const measured = !stale && planRan &&
+      mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
+    // A module mount replicated into zygote's namespace is inherited by every app, even
+    // though this namespace's three mount rows pass; an unabsorbed module mount is visible.
+    const nsRows = ((CHECK && CHECK.checks) || []).filter(function (c) {
+      return (c.name === "foreign mount in another namespace" || c.name === "module mount not absorbed") &&
+        (c.verdict === "warn" || c.verdict === "fail");
+    });
+    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); })
+      .concat(nsRows);
     const fmnt = measured ? bad.length : -1;
 
     // '?' is the probe saying it could not read this, which the "" path already treats as
@@ -231,7 +280,7 @@
     if (keyMatch) tells.push("build keys");
     if (seTell) tells.push("SELinux " + se);
 
-    $("mSu").innerHTML = !probe.ok ? 'not measured <small>probe did not run</small>'
+    $("mSu").innerHTML = kv.done !== "1" ? 'not measured <small>probe did not run</small>'
       : noKsud ? 'not measured <small>no KernelSU-family manager here</small>'
       : sucompat ? 'sucompat <small>kernel · mountless</small>'
       : 'external <small>unmanaged</small>';
@@ -292,13 +341,21 @@
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers. Open " +
         "<b>Checks</b>.");
+    } else if (guardTripped(CHECK)) {
+      say("info", "Paused by the bootloop guard", "nothing is being injected",
+        "The guard parked the Suite, so there is nothing being served to look at. " +
+        esc(GUARD_HINT));
     } else if (!probe.ok) {
       // Ahead of every "clean" arm on purpose: without this, a probe that read nothing
       // fell through to "Fully mountless · zero mounts, nothing to hide".
-      say("info", "Posture not measured", "the probe could not read this device",
-        "None of the mount, build-key or SELinux readings on this card ran here, so this " +
-        "says nothing either way - it is not a clean result. This is usually a shell with " +
-        "no <code>PATH</code>. Run <code>nomount check</code> from a terminal.");
+      say("info", "Posture not measured",
+        kv.done !== "1" ? "the probe could not read this device" : "the mount count could not be read",
+        (kv.done !== "1"
+          ? "None of the readings on this card ran here, so this says nothing either way - "
+          : "The rows that read a value are shown; without the mount count this says nothing " +
+            "either way about mounts - ") +
+        "it is not a clean result. This is usually a shell with no <code>PATH</code>. Run " +
+        "<code>nomount check</code> from a terminal.");
     } else if (appNm > 0) {
       say("info", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
@@ -326,7 +383,8 @@
     } else if (rootNm > 0) {
       say("clean", "Clean · nothing visible to apps",
         rootNm + " mount" + (rootNm > 1 ? "s" : "") + " hidden from non-root",
-        "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount " +
+        "Injections are mountless" + (sucompat ? " and su is sucompat" : "") +
+        ". Any remaining <code>nomount_*</code> mount " +
         "is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still " +
         "sees everything.");
     } else if (tells.length) {
@@ -336,8 +394,10 @@
         ". These are properties and boot state, not mounts; nothing on this page changes them.");
     } else {
       const how =
-        "Injections and RRO overlays are both Prism (<b>no overlayfs</b>, no tmpfs) and su is " +
-        "sucompat. Root and apps see the <b>same</b> mount table, so there is no gap to flag.";
+        "Injections and RRO overlays are both Prism (<b>no overlayfs</b>, no tmpfs)" +
+        (sucompat ? " and su is sucompat" : "") +
+        ". Root and apps see the <b>same</b> mount table, so there is no gap to flag." +
+        (CHECK && CHECK.ts ? " Mount readings from the check " + esc(auAge(CHECK.ts)) + "." : "");
       if (ourBinds > 0) {
         const them = ourBinds > 1 ? "them" : "it";
         say("clean", "Mountless · " + ourBinds + " my_* bind" + (ourBinds > 1 ? "s" : ""),
@@ -381,6 +441,8 @@
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped · disabled"; $("gdot").className = "dot info"; $("rearm").classList.remove("u-hide");
+      expandCard("cardGuard");
+      expandCard("incidentcard");
     } else {
       $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").classList.add("u-hide");
     }

@@ -40,12 +40,7 @@ fn skip_list() -> (Vec<String>, &'static str, bool) {
                 if from == "the built-in list" {
                     from = f;
                 }
-                entries.extend(
-                    s.lines()
-                        .map(|l| l.trim())
-                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                        .map(str::to_string),
-                );
+                entries.extend(crate::statefile::list_entries(&s).into_iter().map(str::to_string));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
@@ -161,6 +156,8 @@ pub(crate) struct MountRow {
     pub root: String,
     pub target: PathBuf,
     pub fstype: String,
+    /// The super options, the last field: an overlay's lowerdir/upperdir live here.
+    pub superopts: String,
 }
 
 pub(crate) fn read_mountinfo(path: &str) -> std::io::Result<Vec<MountRow>> {
@@ -176,13 +173,14 @@ pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
             continue;
         }
         let Ok(dev) = std::str::from_utf8(f[2]) else { continue };
-        let fstype = f
-            .iter()
-            .skip(6)
-            .position(|x| *x == b"-")
-            .and_then(|i| f.get(i + 7))
-            .map(|t| String::from_utf8_lossy(t).into_owned())
-            .unwrap_or_default();
+        let sep = f.iter().skip(6).position(|x| *x == b"-").map(|i| i + 6);
+        let field = |k: usize| {
+            sep.and_then(|i| f.get(i + k))
+                .map(|t| String::from_utf8_lossy(t).into_owned())
+                .unwrap_or_default()
+        };
+        let fstype = field(1);
+        let superopts = field(3);
         out.push(MountRow {
             id: String::from_utf8_lossy(f[0]).into_owned(),
             parent: String::from_utf8_lossy(f[1]).into_owned(),
@@ -190,6 +188,7 @@ pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
             root: String::from_utf8_lossy(&unescape_bytes(f[3])).into_owned(),
             target: PathBuf::from(std::ffi::OsString::from_vec(unescape_bytes(f[4]))),
             fstype,
+            superopts,
         });
     }
     out
@@ -262,6 +261,15 @@ fn apk_scope_cached() -> &'static std::result::Result<Vec<u32>, String> {
     S.get_or_init(|| crate::blocklist::apk_scope().map_err(|e| e.to_string()))
 }
 
+/// Why a bind over an installed APK must stay mounted: add_rule refuses every APK while
+/// apkscope is unresolvable, so unmounting it would put the stock APK back.
+fn apk_scope_blocks(target: &Path) -> Option<String> {
+    if !target.starts_with("/data/app/") {
+        return None;
+    }
+    apk_scope_cached().as_ref().err().cloned()
+}
+
 /// Install an injection, scoped when the target is an APK and the operator opted in by
 /// listing apps in apkscope. Everything else keeps the legacy unscoped shape, so the
 /// RCU fast path is only given up where it was asked for.
@@ -270,22 +278,28 @@ fn apk_scope_cached() -> &'static std::result::Result<Vec<u32>, String> {
 /// APK to the very app being hidden from, and silently -- the operator would believe the
 /// exclusion held.
 fn add_rule(nm: &Nm, target: &Path, source: &Path) -> bool {
-    if !is_app_apk(target) {
-        return nm.add(target, source).is_ok();
-    }
-    match apk_scope_cached() {
-        Ok(deny) if deny.is_empty() => nm.add(target, source).is_ok(),
-        Ok(deny) => nm.add_scoped(target, source, deny).is_ok(),
-        Err(why) => {
-            eprintln!(
-                "nomount: absorb: not serving {} - {} could not be resolved ({why}); serving it \
-                 unscoped would show the patched APK to the app you are hiding it from",
-                target.display(),
-                crate::blocklist::APKSCOPE_PATH
-            );
-            false
+    let r = if !is_app_apk(target) {
+        nm.add(target, source)
+    } else {
+        match apk_scope_cached() {
+            Ok(deny) if deny.is_empty() => nm.add(target, source),
+            Ok(deny) => nm.add_scoped(target, source, deny),
+            Err(why) => {
+                eprintln!(
+                    "nomount: absorb: not serving {} - {} could not be resolved ({why}); serving \
+                     it unscoped would show the patched APK to the app you are hiding it from",
+                    target.display(),
+                    crate::blocklist::APKSCOPE_PATH
+                );
+                return false;
+            }
         }
+    };
+    // The engine's reason ("needs 36, has 34") was dropped here, leaving only "not served".
+    if let Err(e) = &r {
+        eprintln!("nomount: absorb: could not serve {}: {e:#}", target.display());
     }
+    r.is_ok()
 }
 
 pub(crate) fn is_app_apk(target: &Path) -> bool {
@@ -528,7 +542,7 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let roots = fs_roots(&rows);
     let (skips, skip_src, _) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
-    let red = Redundancy::new(&Nm::new().list().unwrap_or_default(), &rows);
+    let red = Redundancy::new(&Nm::new().list_retry().unwrap_or_default(), &rows);
 
     let mut out: Vec<Surveyed> = rows
         .iter()
@@ -707,12 +721,22 @@ pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
 /// appeared in the same instant. Closing that would mean carrying the candidate set down
 /// here, and the window is one mountinfo read wide.
 pub(crate) fn pop_owned(target: &Path, pops: usize) -> usize {
+    pop_owned_with(target, pops, false)
+}
+
+/// `rom_tmpfs`: also own a bare tmpfs on a ROM path. Its root is "/", so source_of() can
+/// never place it under /data/adb, and the takeover built for exactly that mount always
+/// refused it -- the tmpfs stayed in every app's mountinfo.
+fn pop_owned_with(target: &Path, pops: usize, rom_tmpfs: bool) -> usize {
     let mut done = 0;
     for _ in 0..pops {
         if !still_mounted(target) {
             break;
         }
-        if mounts_here_are_ours(target).map(|(ours, _)| ours) != Some(true) {
+        let owned = read_mountinfo(MOUNTINFO)
+            .ok()
+            .and_then(|rows| ownership_of_with(&rows, target, rom_tmpfs));
+        if owned.map(|(ours, _)| ours) != Some(true) {
             eprintln!(
                 "nomount: {} now carries a mount the module system did not make (or the \
                  mount table could not be read); stopping rather than detaching it",
@@ -733,16 +757,39 @@ pub(crate) fn mounts_here_are_ours(target: &Path) -> Option<(bool, usize)> {
 }
 
 fn ownership_of(rows: &[MountRow], target: &Path) -> Option<(bool, usize)> {
+    ownership_of_with(rows, target, false)
+}
+
+fn ownership_of_with(rows: &[MountRow], target: &Path, rom_tmpfs: bool) -> Option<(bool, usize)> {
     let roots = fs_roots(rows);
     let here: Vec<&MountRow> = rows.iter().filter(|r| r.target == target).collect();
     if here.is_empty() {
         return None;
     }
     // Every row, not just the top one: popping the stack reaches all of them.
-    let ours = here
-        .iter()
-        .all(|r| source_of(r, &roots).is_some_and(|s| s.starts_with("/data/adb")));
+    let ours = here.iter().all(|r| {
+        source_of(r, &roots).is_some_and(|s| s.starts_with("/data/adb"))
+            || (rom_tmpfs && r.fstype == "tmpfs" && on_rom_path(&r.target.to_string_lossy()))
+    });
     Some((ours, here.len()))
+}
+
+/// The boot half of the ROM-tmpfs takeover: a module re-made its tmpfs before this pass, so
+/// clear it the way absorb would rather than refusing it as somebody else's mount.
+fn clear_rom_tmpfs(mounted: &HashSet<PathBuf>, t: &Path) -> bool {
+    if still_mounted(t) {
+        if let Some((true, n)) = read_mountinfo(MOUNTINFO)
+            .ok()
+            .and_then(|rows| ownership_of_with(&rows, t, true))
+        {
+            pop_owned_with(t, n, true);
+            if still_mounted(t) {
+                eprintln!("nomount: {} kept its tmpfs after the unmount", t.display());
+                return false;
+            }
+        }
+    }
+    crate::mount::unmount_before_serving(mounted, t)
 }
 
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
@@ -818,7 +865,15 @@ fn prune_absorbed_record(early: bool) {
             if !is_skipped(src, t, &skips) {
                 return true;
             }
-            let _ = Nm::new().del(t);
+            // del_any: an absorbed APK rule is scoped whenever apkscope is set, and a plain
+            // del cannot match it. Keep the row unless the rule is really gone.
+            if Nm::new().del_any(t).is_err() {
+                eprintln!(
+                    "nomount: could not release {} - it stays live and recorded",
+                    t.display()
+                );
+                return true;
+            }
             released.push(t.display().to_string());
             false
         })
@@ -873,7 +928,13 @@ fn label_apk_readable(p: &Path) -> bool {
 
 pub fn reapply_absorbed(nm: &Nm, early: bool) -> u32 {
     match read_absorbed_pairs() {
-        Ok(p) => reapply_pairs(nm, &p, early),
+        Ok(p) => {
+            let (n, failed) = reapply_pairs(nm, &p, early);
+            if failed > 0 {
+                eprintln!("nomount: {failed} recorded APK rule(s) could not be re-served");
+            }
+            n
+        }
         Err(e) => {
             eprintln!(
                 "nomount: could not read {ABSORBED_LIST} ({e}) -- no recorded APK rule was \
@@ -884,7 +945,7 @@ pub fn reapply_absorbed(nm: &Nm, early: bool) -> u32 {
     }
 }
 
-pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
+pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> (u32, u32) {
     reapply_pairs(nm, pairs, true)
 }
 
@@ -925,25 +986,26 @@ fn scope_decision(is_apk: bool, want: Option<&[u32]>, live_deny: &[u32]) -> bool
     }
 }
 
-fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
+/// (re-served, failed). A failure here was silent: the boot summary said "0 failed".
+fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> (u32, u32) {
     let Ok(live) = nm.list() else {
         eprintln!(
             "nomount: cannot enumerate live rules - skipping the absorbed-rule re-serve this \
              pass (re-adding blind would d_drop rules that are already live)"
         );
-        return 0;
+        return (0, pairs.len() as u32);
     };
     // target -> its live exclusion set, not just a set of targets. Dropping `deny` here
     // is what made editing apkscope inert: the skip below saw the target was live and
     // moved on, so an absorbed APK kept serving to the very app the operator had just
     // excluded, until the next reboot did a full clear-and-rebuild.
-    let live_scoped: std::collections::HashMap<PathBuf, Vec<u32>> =
+    let live_scoped: std::collections::HashMap<PathBuf, (Option<PathBuf>, Vec<u32>)> =
         crate::nm::parse_list(&live)
             .into_iter()
             .filter(|r| r.kind == crate::nm::LiveKind::Inject)
-            .map(|r| (r.target, r.deny))
+            .map(|r| (r.target, (r.source, r.deny)))
             .collect();
-    let mut n = 0;
+    let (mut n, mut failed) = (0u32, 0u32);
     for (target, source) in pairs {
         if !source.exists() || !target.exists() {
             continue;
@@ -963,24 +1025,17 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
                 continue;
             }
         }
-        if let Some(live_deny) = live_scoped.get(target) {
-            if apk_scope_current(target, live_deny) {
-                continue;
-            }
-            // Live, but with the wrong audience. del first: add_rule would otherwise be a
-            // second rule on a vpath the engine already has, and the delete key is the
-            // whole scope, which is why del_any reads the live deny set back.
-            eprintln!(
-                "nomount: {} is live with a stale exclusion set - re-serving it with the \
-                 current apkscope",
-                target.display()
-            );
-            if nm.del_any(target).is_err() {
+        let live = live_scoped.get(target);
+        if let Some((live_src, live_deny)) = live {
+            if live_src.as_deref() != Some(source.as_path()) {
                 eprintln!(
-                    "nomount: could not drop the stale rule for {} - it keeps the old \
-                     exclusion set until the next boot",
+                    "nomount: not re-serving {} - a live rule from another source owns it; \
+                     leaving that writer's rule alone",
                     target.display()
                 );
+                continue;
+            }
+            if apk_scope_current(target, live_deny) {
                 continue;
             }
         }
@@ -1016,11 +1071,50 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
             );
             continue;
         }
+        if let Some((_, live_deny)) = live {
+            // Live, but with the wrong audience, and every skip check above has passed:
+            // only now drop it. del first: add_rule would otherwise be a second rule on a
+            // vpath the engine already has, and the delete key is the whole scope.
+            eprintln!(
+                "nomount: {} is live with a stale exclusion set - re-serving it with the \
+                 current apkscope",
+                target.display()
+            );
+            if nm.del_any(target).is_err() {
+                eprintln!(
+                    "nomount: could not drop the stale rule for {} - it keeps the old \
+                     exclusion set until the next boot",
+                    target.display()
+                );
+                continue;
+            }
+            if add_rule(nm, target, source) {
+                n += 1;
+            } else if restore_rule(nm, target, source, live_deny).is_err() {
+                failed += 1;
+                eprintln!(
+                    "nomount: {} could not be re-served and its previous rule could not be \
+                     restored - it is unserved until the next boot",
+                    target.display()
+                );
+            }
+            continue;
+        }
         if add_rule(nm, target, source) {
             n += 1;
+        } else {
+            failed += 1;
         }
     }
-    n
+    (n, failed)
+}
+
+fn restore_rule(nm: &Nm, target: &Path, source: &Path, deny: &[u32]) -> anyhow::Result<()> {
+    if deny.is_empty() {
+        nm.add(target, source)
+    } else {
+        nm.add_scoped(target, source, deny)
+    }
 }
 
 pub fn read_absorbed_targets() -> std::io::Result<HashSet<PathBuf>> {
@@ -1243,8 +1337,8 @@ type LiveMap = std::collections::HashMap<PathBuf, PathBuf>;
 /// the source map is untouched; only the places that decide "already correct" need it.
 type ScopeMap = std::collections::HashMap<PathBuf, Vec<u32>>;
 
-fn live_injects(nm: &Nm) -> (LiveMap, ScopeMap) {
-    let Ok(l) = nm.list() else { return (LiveMap::new(), ScopeMap::new()) };
+fn live_injects(nm: &Nm) -> Result<(LiveMap, ScopeMap)> {
+    let l = nm.list_retry()?;
     let rules = crate::nm::parse_list(&l);
     let scopes = rules
         .iter()
@@ -1256,7 +1350,7 @@ fn live_injects(nm: &Nm) -> (LiveMap, ScopeMap) {
         .filter(|r| r.uid == 0)
         .filter_map(|r| r.source.map(|src| (r.target, src)))
         .collect();
-    (live, scopes)
+    Ok((live, scopes))
 }
 
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
@@ -1337,6 +1431,19 @@ fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
 pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
+    // Only the rules absorb recorded. Another writer's rule on an APK (Morphe's scoped
+    // one, a `vfs add --uid-excluded`) is that writer's to re-point, and re-adding it here
+    // under apkscope would drop its exclusion.
+    let recorded: std::collections::HashMap<PathBuf, PathBuf> = match read_absorbed_pairs() {
+        Ok(v) => v.into_iter().collect(),
+        Err(e) => {
+            eprintln!(
+                "nomount: could not read {ABSORBED_LIST} ({e}) - not re-pointing any APK rule \
+                 this pass, since which ones are ours is unknown"
+            );
+            return (0, 0);
+        }
+    };
     let mut pm_failed = false;
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut dropped: Vec<PathBuf> = Vec::new();
@@ -1355,6 +1462,9 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
         let Some(source) = r.source else { continue };
         let target = r.target.as_path();
         if !is_app_apk(target) || target.exists() {
+            continue;
+        }
+        if recorded.get(target) != Some(&source) {
             continue;
         }
         let Some(pkg) = pkg_of_apk_target(target) else { continue };
@@ -1493,11 +1603,24 @@ pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
         let subtree_bind = r.root != "/";
         let off_userdata = data_dev.as_deref() == Some(r.dev.as_str());
         let loop_image = is_loop_dev(&r.dev);
-        if subtree_bind || off_userdata || loop_image {
+        if subtree_bind || off_userdata || loop_image || overlay_layers_on_data(r) {
             hits.push((format!("{} (root={}, dev={})", t, r.root, r.dev), loop_image));
         }
     }
     hits
+}
+
+/// An overlay whose layers live on /data is a module's, not the ROM's: OxygenOS's own
+/// /product overlays stack ROM partitions only. Its root is "/", so the root and device
+/// tests above never see it.
+fn overlay_layers_on_data(r: &MountRow) -> bool {
+    r.fstype == "overlay"
+        && r.superopts.split(',').any(|o| {
+            ["lowerdir=", "lowerdir+=", "upperdir=", "workdir="]
+                .iter()
+                .filter_map(|k| o.strip_prefix(k))
+                .any(|v| v.split(':').any(|d| d.starts_with("/data/")))
+        })
 }
 
 pub(crate) fn foreign_rom_mounts(rows: &[MountRow]) -> Vec<String> {
@@ -1517,7 +1640,7 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     on_rom_path(target).then(|| PathBuf::from(unescape(target)))
 }
 
-fn boot_id() -> Option<String> {
+pub(crate) fn boot_id() -> Option<String> {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()
         .map(|s| s.trim().to_string())
@@ -1556,15 +1679,32 @@ fn tree_has_no_files(p: &Path, depth: u32) -> bool {
     true
 }
 
+/// What an empty-directory takeover replaces, which also decides whose mount it may pop.
+#[derive(Clone, Copy)]
+enum Takeover {
+    RomTmpfs,
+    EmptyBind,
+}
+
+impl Takeover {
+    fn label(self) -> &'static str {
+        match self {
+            Takeover::RomTmpfs => "a tmpfs",
+            Takeover::EmptyBind => "an empty directory bind",
+        }
+    }
+}
+
 fn take_over_empty_dir(
     nm: &Nm,
     target: &Path,
     record: &mut Vec<(PathBuf, String)>,
     durable: &[String],
     boot: &str,
-    from: &str,
+    kind: Takeover,
     pops: usize,
 ) -> bool {
+    let from = kind.label();
     let t_str = target.to_string_lossy().into_owned();
     // Ask whether we may hide this BEFORE unmounting it. can_whiteout refuses a bare
     // partition root, and a tmpfs on one reaches here - so validating afterwards
@@ -1581,7 +1721,7 @@ fn take_over_empty_dir(
     if ours {
         let _ = nm.del_any(target);
     }
-    pop_owned(target, pops);
+    pop_owned_with(target, pops, matches!(kind, Takeover::RomTmpfs));
     if still_mounted(target) {
         eprintln!(
             "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -1709,10 +1849,11 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
 /// `nm.whiteout` straight after `validate`, with no mount check at all -- and whiteouting
 /// over a live tmpfs leaves its row in every app's mountinfo with no path resolving to it,
 /// which is exactly the residue the rest of this file exists to avoid.
+/// (re-applied, failed), so the boot summary counts what it could not restore.
 pub fn reapply_tmpfs_whiteouts(
     nm: &Nm,
     mounted: &std::collections::HashSet<PathBuf>,
-) -> u32 {
+) -> (u32, u32) {
     let mut n = 0u32;
     let record = match read_absorbed_tmpfs() {
         Ok(v) => v,
@@ -1721,7 +1862,7 @@ pub fn reapply_tmpfs_whiteouts(
                 "nomount: could not read {ABSORBED_TMPFS_LIST} ({e}) -- NO recorded ROM-directory \
                  hide was re-applied, so every one of them is visible this session"
             );
-            return 0;
+            return (0, 1);
         }
     };
     let mut failed = 0u32;
@@ -1730,7 +1871,7 @@ pub fn reapply_tmpfs_whiteouts(
             eprintln!("nomount: skipping invalid ROM-tmpfs entry {}", t.display());
             continue;
         }
-        if !crate::mount::unmount_before_serving(mounted, &t) {
+        if !clear_rom_tmpfs(mounted, &t) {
             failed += 1;
             continue;
         }
@@ -1748,7 +1889,7 @@ pub fn reapply_tmpfs_whiteouts(
     if failed > 0 {
         eprintln!("nomount: {failed} recorded ROM-directory hide(s) could not be re-applied");
     }
-    n
+    (n, failed)
 }
 
 #[derive(Default)]
@@ -1877,7 +2018,7 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
             continue;
         }
         seen.insert(target.clone());
-        if take_over_empty_dir(&nm, &target, &mut record, &durable, &boot, "a tmpfs", 1) {
+        if take_over_empty_dir(&nm, &target, &mut record, &durable, &boot, Takeover::RomTmpfs, 1) {
             st.done += 1;
         } else {
             st.failed += 1;
@@ -2131,7 +2272,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
     };
     let (mut dropped, mut held) = (0u32, 0u32);
-    let (live_map, live_scopes) = live_injects(&nm);
+    let (live_map, live_scopes) = live_injects(&nm).context(
+        "cannot read the live rules - absorbing now would re-add over rules it cannot see",
+    )?;
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     let mut stacks: HashSet<PathBuf> = HashSet::new();
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -2169,6 +2312,18 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         };
         if pops > 1 {
             stacks.insert(c.target.clone());
+        }
+        if let Some(why) = apk_scope_blocks(&c.target) {
+            eprintln!(
+                "nomount: LEAK {} <- {} stays mounted: {} could not be resolved ({why}), so \
+                 the APK could not be re-served after the unmount",
+                c.target.display(),
+                c.source.display(),
+                crate::blocklist::APKSCOPE_PATH
+            );
+            leaking += 1;
+            held += 1;
+            continue;
         }
         if c.redundant {
             if dry_run {
@@ -2284,7 +2439,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 continue;
             }
             if take_over_empty_dir(
-                &nm, &c.target, record, durable, boot, "an empty directory bind", pops,
+                &nm, &c.target, record, durable, boot, Takeover::EmptyBind, pops,
             ) {
                 emptied += 1;
             } else {
@@ -2334,7 +2489,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 Some((rec, durable, boot))
                     if crate::mount::path_is_representable(&c.target).is_ok() =>
                 {
-                    take_over_empty_dir(&nm, &c.target, rec, durable, boot, "an empty directory bind", 1)
+                    take_over_empty_dir(&nm, &c.target, rec, durable, boot, Takeover::EmptyBind, 1)
                 }
                 _ => false,
             };
@@ -2413,6 +2568,41 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+
+    /// A module's `mount -t tmpfs tmpfs /system/app/X` has root "/", so the plain ownership
+    /// test can never claim it and the takeover built for it always refused. Only the tmpfs
+    /// path may own it, and never a tmpfs off the ROM or a mount of another type.
+    #[test]
+    fn a_rom_tmpfs_is_owned_only_by_the_tmpfs_takeover() {
+        let mi = "77 30 0:99 / /system/app/Bloat rw,relatime - tmpfs tmpfs rw,mode=755\n\
+                  78 30 0:98 / /mnt/scratch rw,relatime - tmpfs tmpfs rw\n\
+                  79 30 0:97 / /system/etc/x ro,relatime - erofs /dev/block/dm-9 ro\n";
+        let rows = super::parse_mountinfo(mi);
+        let t = std::path::Path::new("/system/app/Bloat");
+        assert_eq!(super::ownership_of(&rows, t), Some((false, 1)));
+        assert_eq!(super::ownership_of_with(&rows, t, true), Some((true, 1)));
+        let off_rom = std::path::Path::new("/mnt/scratch");
+        assert_eq!(super::ownership_of_with(&rows, off_rom, true), Some((false, 1)));
+        let other_fs = std::path::Path::new("/system/etc/x");
+        assert_eq!(super::ownership_of_with(&rows, other_fs, true), Some((false, 1)));
+    }
+
+    /// A module's own overlayfs over a ROM path had root "/", so every mount check passed
+    /// and the device read "Fully mountless". The stock OxygenOS /product overlays, which
+    /// stack ROM partitions only, must keep passing.
+    #[test]
+    fn a_module_overlay_on_data_is_a_foreign_rom_mount_and_stock_overlays_are_not() {
+        let mi = "20 1 253:5 / /data rw,nosuid - f2fs /dev/block/dm-5 rw,seclabel\n\
+                  45 30 0:27 / /product/overlay ro,relatime shared:20 - overlay overlay \
+                  ro,seclabel,lowerdir=/my_product/overlay:/product/overlay\n\
+                  900 30 0:123 / /system/etc ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/data/adb/modules/x/system/etc:/system/etc\n";
+        let rows = super::parse_mountinfo(mi);
+        assert_eq!(rows[2].superopts, "ro,seclabel,lowerdir=/data/adb/modules/x/system/etc:/system/etc");
+        let hits = super::foreign_rom_mounts(&rows);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].starts_with("/system/etc "), "{hits:?}");
+    }
 
     #[test]
     fn an_unreadable_apkscope_leaves_a_live_rule_alone() {

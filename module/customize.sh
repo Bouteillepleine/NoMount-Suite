@@ -112,12 +112,20 @@ unset _k
 _eng=0
 _lrc=1
 _denied=0
+# No live insmod from recovery (wrong kernel) or while the Suite is parked; boot loads it.
+_lskip=""
+if [ "$_booted" != "1" ]; then
+    _lskip=recovery
+elif [ -e /data/adb/nomount/disabled ]; then
+    _lskip=disabled
+fi
+[ "$_bundled" = 1 ] && command -v nm_lkm_retire_kept >/dev/null 2>&1 && nm_lkm_retire_kept "$_lskip"
 if [ -x "$_nm" ]; then
     _evl=$("$_nm" v 2>/dev/null | head -n 1)
     _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
     _eb=""
     case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
-    if [ -z "$_ev" ] && command -v nm_lkm_load_best >/dev/null 2>&1; then
+    if [ -z "$_ev" ] && [ -z "$_lskip" ] && command -v nm_lkm_load_best >/dev/null 2>&1; then
         nm_lkm_load_best "$MODPATH/lkm"; _lrc=$?
         if [ "$_lrc" = 0 ] || [ "$_lrc" = 2 ]; then
             nm_lkm_prune "$MODPATH/lkm"
@@ -164,6 +172,13 @@ if [ -x "$_nm" ]; then
             ui_print "! may well have NoMount. Do NOT reflash it. Look for a"
             ui_print "! denied netlink_socket create on the domain running nm,"
             ui_print "! then reinstall."
+        elif [ "$_lskip" = disabled ] && [ "$_bundled" = 1 ]; then
+            ui_print "! The Suite is parked (/data/adb/nomount/disabled), so the"
+            ui_print "! engine module was NOT loaded now. Clear the flag, then"
+            ui_print "! reboot: the boot loads it, with the bootloop guard armed."
+        elif [ "$_lskip" = recovery ] && [ "$_bundled" = 1 ]; then
+            ui_print "! Installed from recovery: the engine module loads at the"
+            ui_print "! next normal boot, not into the recovery kernel."
         elif [ "$_bundled" = 0 ]; then
             ui_print "! This zip bundles NO engine module - it is the lite zip,"
             ui_print "! for a kernel that already has NoMount built in. Nothing"
@@ -180,7 +195,7 @@ if [ -x "$_nm" ]; then
         fi
         ui_print "!   kernel: $(uname -r)"
         ui_print "!   nm: netlink proto 29, errno ${_nmerrno:-unknown}"
-        if [ "$_booted" != "1" ] && [ "$_denied" != 1 ]; then
+        if [ "$_booted" != "1" ] && [ "$_denied" != 1 ] && [ "$_bundled" = 0 ]; then
             ui_print "! From recovery the engine cannot answer at all - reboot,"
             ui_print "! then reinstall to find out."
         fi
@@ -316,7 +331,12 @@ fi
 
 if [ "$_eng" = 1 ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
-    ui_print "- next step: reboot. Nothing is served until you do."
+    if [ -f /data/adb/modules/meta-nomount/module.prop ] && [ ! -e /data/adb/modules/meta-nomount/disable ]; then
+        ui_print "- next step: reboot. The new version takes over then; until then the"
+        ui_print "  current one keeps serving."
+    else
+        ui_print "- next step: reboot. Nothing is served until you do."
+    fi
 elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "- next step: none - this zip is arm64-v8a only and this device is ${_abi}."
     ui_print "  Re-flashing cannot help. Remove it from your manager."
@@ -326,6 +346,8 @@ elif [ ! -x "$_nm" ]; then
 elif [ "$_denied" = 1 ]; then
     ui_print "- next step: clear the SELinux denial above, then reinstall. Reflashing"
     ui_print "  the kernel is the wrong move - the socket was refused, not absent."
+elif [ "$_eng" != 1 ] && [ "$_lskip" = disabled ]; then
+    ui_print "- next step: clear the disable flag (see above), then reboot."
 elif [ "$_eng" != 1 ] && [ "$_booted" != "1" ]; then
     ui_print "- Installed from recovery, where the engine cannot answer."
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
@@ -351,6 +373,9 @@ if [ "$_eng" != 1 ]; then
     if [ "$_denied" = 1 ]; then
         ui_print "! INSTALLED BUT INACTIVE - the engine could not be reached."
         ui_print "! The kernel is not implicated. See the next step above."
+    elif [ "$_lskip" = disabled ]; then
+        ui_print "! INSTALLED BUT PARKED - nothing is injected until the"
+        ui_print "! disable flag is cleared and the phone rebooted."
     elif [ "$_booted" != "1" ]; then
         ui_print "! INSTALLED - engine state UNKNOWN (no running kernel to"
         ui_print "! ask). Reboot and re-check before relying on it."
@@ -361,4 +386,4 @@ if [ "$_eng" != 1 ]; then
     ui_print "! Any success line below refers to the files, not the engine."
     ui_print "*********************************************************"
 fi
-unset _booted _eng _lrc _bundled _denied _nmerr _nmerrno
+unset _booted _eng _lrc _bundled _denied _nmerr _nmerrno _lskip

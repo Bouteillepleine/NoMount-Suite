@@ -9,6 +9,11 @@
       .replace(/uid \d+ \(hidden\)/g, "uid <redacted> (hidden)")
       .replace(/hidden uid \d+/g, "hidden uid <redacted>");
   }
+  // A tombstone line names the crashed process, which can be an app on the hide list.
+  function redactIncident(s) {
+    return redactUids(s).replace(/(>>> |name: )([\w]+(?:\.[\w]+)+)(?=[: ])/g, (m, a, n) =>
+      /^(com\.android|android)\./.test(n) ? m : a + "<app>");
+  }
 
   function parseJson(r) {
     const raw = (r.stdout || "").trim();
@@ -38,8 +43,12 @@
   }
   function checkById(id) { return findCheck(CHECK, id); }
 
+  // Down only when something measured it down. This page's own read failing for SELinux,
+  // a timeout or a missing bridge says nothing about the engine, and a live read beats a
+  // cached report that once said engine: null.
   function engineDown(r) {
-    if (ENGINE_LIVE === false) return true;
+    if (ENGINE_STATE === "absent" || ENGINE_STATE === "unreachable") return true;
+    if (ENGINE_STATE === "live") return false;
     return !!r && ranSection(r, "device") && r.engine === null;
   }
   function guardTripped(r) {
@@ -111,17 +120,20 @@
     const s = r.summary;
     const attn = (s.open_failures || 0) + (s.warn || 0);
     const unm = s.unmeasured || 0;
-    const age = r.ts ? ' <span class="age">· checked ' + esc(auAge(r.ts)) + "</span>" : "";
+    // A background re-check can swap the verdict a minute later; say one is running.
+    const again = CHECK_RUNNING ? " · re-checking…" : "";
+    const age = r.ts ? ' <span class="age">· checked ' + esc(auAge(r.ts)) + again + "</span>" : "";
     if (attn > 0) {
-      dot.className = "hl-dot ok";
+      dot.className = "hl-dot info";
       txt.innerHTML = "<b>" + attn + (attn > 1 ? " findings" : " finding") +
                       " worth reading</b>" + age;
     } else if (!ranSection(r, "device")) {
-      dot.className = "hl-dot info";
+      // Grey, not blue: blue is a finding; this is a gap in what was measured.
+      dot.className = "hl-dot";
       txt.innerHTML = "<b>Only your plan was checked</b> " +
                       "<span class=\"age\">· tap to check the device too</span>";
     } else if (unm > 0 || s.complete === false) {
-      dot.className = "hl-dot info";
+      dot.className = "hl-dot";
       txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\">· " +
                       (unm || 1) + (unm === 1 ? " check" : " checks") +
                       " had nothing to look at</span>";
@@ -241,7 +253,9 @@
     const fresh = ts && (Math.floor(Date.now() / 1000) - ts) < CHECK_FRESH_SECS;
     if (fresh && ranSection(CHECK, "device")) return;
     CHECK_RUNNING = checkLoop(autoPass);
+    paintHealthLine(CHECK);
     await CHECK_RUNNING;
+    paintHealthLine(CHECK);
   }
   async function autoPass() {
     try {
@@ -268,7 +282,7 @@
 
     if (!r || !r.checks) {
       list.innerHTML = engineDown(r)
-        ? '<div class="empty">No kernel driver, so there is nothing to check yet. Use <b>Copy report</b> to get the details for a bug report.</div>'
+        ? '<div class="empty">The engine is not answering, so there is nothing to check yet. Use <b>Copy report</b> to get the details for a bug report.</div>'
         : '<div class="empty">Not checked yet. Press <b>Re-run</b>.</div>';
       chip.textContent = engineDown(r) ? "engine down" : "not checked";
       chip.className = "chip info";
@@ -294,16 +308,16 @@
     else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip info"; }
     else if (attention.length) {
       chip.textContent = attention.length + (attention.length > 1 ? " findings" : " finding");
-      chip.className = "chip ok";
+      chip.className = "chip info";
     }
-    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip info"; }
-    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip info"; }
+    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip"; }
+    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip"; }
     // A report with no checks at all, or no summary, has measured nothing - and this chip
     // is what shows while the card is collapsed. It used to fall through to "all clear"
     // because the ladder only ever looked at rows it had FILTERED OUT as uninteresting,
     // never at whether there were any to begin with. paintModuleMetric in 40-rules.js
     // already reasons this way; this ladder did not.
-    else if (!measuredReport(r)) { chip.textContent = "not measured"; chip.className = "chip info"; }
+    else if (!measuredReport(r)) { chip.textContent = "not measured"; chip.className = "chip"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const s = r.summary || {};
@@ -327,7 +341,7 @@
         (down
           ? "Nothing is being injected, so a clean result below says nothing about how you " +
             "look to an app."
-          : "Re-arm it in Bootloop guard on Status, then reboot.") +
+          : "Re-arm it in Bootloop guard below, then reboot.") +
         '</div><div class="fmeta"><span class="tag info">' +
         (down ? "engine down" : "guard tripped") + "</span></div></div>" +
         group("Worth knowing", attention);
@@ -347,7 +361,8 @@
       return;
     }
 
-    sub.textContent = "Everything that passed is left out. What remains is information about this device; none of it has to be fixed.";
+    sub.textContent = "Everything that passed is left out. Items tagged “a detector can see this” " +
+      "are visible to apps; the rest are for information.";
     let head = "";
     if (!ranSection(r, "device")) {
       head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
@@ -421,13 +436,15 @@
         '$(lsmod 2>/dev/null | grep -c -i kernelsu)"'
       );
       const q = (e.stdout || "").trim().split("|");
+      await zipVariant();
       const t = [
         "NoMount Suite " + SUITE_VERSION +
           (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " · check",
         "device: " + (q[0] || q[5] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
         "kernel: " + (q[3] || "?") + (q[4] ? " · " + q[4] : ""),
         "root: " + (q[6] && q[6] !== "0" ? "kernelsu.ko loaded (KernelSU in LKM mode)" : "no kernelsu.ko in lsmod"),
-        "engine: not responding, no CONFIG_NOMOUNT kernel, so no check could run",
+        "engine: not responding (" + (ENGINE_STATE || "unknown") + ", " +
+          (ZIP_VARIANT || "zip unknown") + "), so no check could run",
       ].join("\n");
       let copied = false;
       try {
@@ -482,6 +499,9 @@
       if (c.meaning) lines.push("  means: " + redactUids(c.meaning));
       lines.push("");
     });
+    // The incident record is the evidence a bootloop report needs, and re-arming moves it.
+    const inc = ((await exec("/system/bin/cat /data/adb/nomount/incident.log 2>/dev/null")).stdout || "").trim();
+    if (inc) lines.push("incident:", redactIncident(inc), "");
     const text = lines.join("\n");
     let ok = false;
     try {
@@ -538,9 +558,21 @@
     const r = await nm("export");
     const txt = (r.stdout || "") + (r.stderr || "");
     _healthShow(txt);
-    const path = (txt.match(/exported to (\S+)/) || [])[1];
-    toast(path ? "Exported to " + path : "Export failed", path ? "ok" : "bad");
+    const zip = (txt.match(/zip: (\S+\.zip)/) || [])[1];
+    const path = zip || (txt.match(/exported to (\S+)/) || [])[1];
+    toast(path ? "Exported to " + path + (zip ? " - attach that file to the issue" : "") : "Export failed",
+          path ? "ok" : "bad");
     done();
+  }
+  async function copyIncident(btn) {
+    const t = ($("incidentout").textContent || "").trim();
+    if (!t) { toast("No incident to copy."); return; }
+    try {
+      await navigator.clipboard.writeText(redactIncident(t));
+      toast("Incident copied.");
+    } catch (e) {
+      toast("Clipboard unavailable. Long-press the text in the card to select it.");
+    }
   }
 
   async function refreshIncident() {
@@ -550,11 +582,20 @@
     if (!txt) {
       card.classList.add("u-hide");
       const w = $("incwarn");
-      if (w) w.hidden = true;
+      if (w) {
+        w.hidden = !REBOOT_NOTICE;
+        if (REBOOT_NOTICE) w.innerHTML = REBOOT_NOTICE;
+      }
       return;
     }
     card.classList.remove("u-hide");
     $("incidentout").textContent = txt;
+    // Not every incident is a guard trip: a missing engine binary writes one too.
+    const binary = /reason=engine did not run|engine binary/i.test(txt);
+    $("incchip").textContent = binary ? "engine binary missing" : "bootloop guard";
+    $("incnote").textContent = binary
+      ? "Saved when a boot found no runnable engine binary. Not live state."
+      : "Saved when the bootloop guard fired. Not live state.";
     const el = $("incwarn");
     if (el) {
       const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
@@ -572,8 +613,8 @@
   async function clearIncident(btn) {
     if (!(await confirmAction(
       "Delete the incident record?",
-      "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
-      "copy, and it usually names the file that caused the failure.",
+      "The saved record of the failed boot is removed for good. It is the only copy, and it " +
+      "usually names the file that caused the failure. Copy incident keeps a copy first.",
       "Delete"))) return;
     btn.disabled = true;
     // The banner used to be hidden BEFORE the delete and the result discarded, so a

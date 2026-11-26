@@ -15,7 +15,14 @@ case "$_now" in ''|*[!0-9]*) _now=0; _epoch_known=0 ;; esac
 case "$_up"  in ''|*[!0-9]*) _up=0;  _epoch_known=0 ;; esac
 _bootepoch=$((_now - _up))
 [ "$_bootepoch" -ge 1000000000 ] 2>/dev/null || _epoch_known=0
+_bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+# boot_id first: a clock behind at service start let the previous boot's report pass ts.
 _health_fresh() {
+    _hb=$(sed -n 's/^boot=//p' "$NMDIR/health.txt" 2>/dev/null)
+    if [ -n "$_hb" ] && [ -n "$_bootid" ]; then
+        [ "$_hb" = "$_bootid" ]
+        return
+    fi
     [ "$_epoch_known" = 1 ] || return 1
     _hts=$(sed -n 's/^ts=//p' "$NMDIR/health.txt" 2>/dev/null)
     case "$_hts" in ''|*[!0-9]*) return 1 ;; esac
@@ -71,16 +78,26 @@ fi
 # copy goes quiet the first time the manager is upgraded. Never create the
 # directory (its absence means that manager is not installed) and never replace
 # a real file, which would be somebody else's nm.
+# nomount goes alongside, because the WebUI and README tell people to run it from su.
+# A link that points somewhere other than this module is another tool's and stays.
 for _nmd in /data/adb/ksu/bin /data/adb/ap/bin; do
     [ -d "$_nmd" ] || continue
-    [ -e "$_nmd/nm" ] && [ ! -L "$_nmd/nm" ] && continue
-    [ "$(readlink "$_nmd/nm" 2>/dev/null)" = "$NM_BIN" ] && continue
-    rm -f "$_nmd/nm" 2>/dev/null
-    if ln -s "$NM_BIN" "$_nmd/nm" 2>/dev/null; then
-        nmlog "linked $_nmd/nm -> $NM_BIN so NoMount-aware installers can find the CLI"
-    fi
+    for _nml in "nm:$NM_BIN" "nomount:$BIN"; do
+        _nmn=${_nml%%:*}; _nmt=${_nml#*:}
+        [ -e "$_nmd/$_nmn" ] && [ ! -L "$_nmd/$_nmn" ] && continue
+        _nmcur=$(readlink "$_nmd/$_nmn" 2>/dev/null)
+        [ "$_nmcur" = "$_nmt" ] && continue
+        case "$_nmcur" in
+            ""|/data/adb/modules/meta-nomount/*|/data/adb/modules_update/meta-nomount/*) ;;
+            *) [ -e "$_nmd/$_nmn" ] && continue ;;
+        esac
+        rm -f "$_nmd/$_nmn" 2>/dev/null
+        if ln -s "$_nmt" "$_nmd/$_nmn" 2>/dev/null; then
+            nmlog "linked $_nmd/$_nmn -> $_nmt"
+        fi
+    done
 done
-unset _nmd
+unset _nmd _nml _nmn _nmt _nmcur
 
 _bh_dir=/data/adb/bindhosts
 _bh_ovr="$_bh_dir/mode_override.sh"
@@ -194,7 +211,7 @@ fi
 fi
 
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
-   && { _has_entries "$NMDIR/uidhide" || _follow_ksu; }; then
+   && { _has_entries "$NMDIR/uidhide" || _follow_ksu || _has_entries "$NMDIR/uidhide.cache"; }; then
     _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
@@ -294,12 +311,12 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1; then
     _watchers=""
     if [ -f "$MODDIR/uidwatch.sh" ]; then
-        nm_watch "$MODDIR/uidwatch.sh" /data/system cewDMmynd "hide-list-package" \
+        nm_watch "$MODDIR/uidwatch.sh" /data/system wDMmynd "hide-list-package" \
             && _watchers="$_watchers $NM_WATCH_PID=hide-list-package"
         # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
         # off, so turning it on takes effect without a reboot.
         if [ -d /data/adb/ksu ]; then
-            nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu cewDMmynd "KernelSU-DenyList" \
+            nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu wDMmynd "KernelSU-DenyList" \
                 && _watchers="$_watchers $NM_WATCH_PID=KernelSU-DenyList"
         fi
     fi
@@ -365,7 +382,8 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
         nmlog "⚠ check wrote no health record this boot - health is unknown, not healthy"
     fi
     if [ "$_arc" -eq 0 ]; then
-        nmlog "check cached - nothing open"
+        # rc 0 covers a WARN and a run that was not fully measured, so quote the verdict.
+        nmlog "check cached - ${_hv:-verdict unknown}"
     elif [ "$_arc" -eq 124 ]; then
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ check timed out after 60s - dropped the stale cache; the WebUI will show no verdict"
@@ -378,7 +396,10 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     unset _arc
 fi
 
-if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ -e "$NMDIR/disabled" ]; then
+    nm_card "⛔ disabled - bootloop guard tripped, see the WebUI" \
+        || nmlog "⚠ could not write the module description card (manager slow or refused)"
+elif [ -x "$BIN" ]; then
     nm_rule_counts
     _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
     _sum_get() {
@@ -386,9 +407,23 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
             | tr ',' '\n' | sed -n "s/^\"$1\"://p" | head -1
     }
     _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
+    # init restarts adbd while the USB gadget settles, and /dev/socket/adbd is the ghost
+    # sample's only path no rule covers: a pass in that gap has nothing to test. Re-ask.
+    _try=0
+    while [ "$_try" -lt 3 ]; do
+        case "$(_sum_get unmeasured "$_doc")" in ''|*[!0-9]*|0) break ;; esac
+        _try=$((_try + 1))
+        sleep 10
+        _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
+    done
     _err=$(_sum_get fail "$_doc")
     _wrn=$(_sum_get warn "$_doc")
     _unm=$(_sum_get unmeasured "$_doc")
+    if [ "$_try" -gt 0 ]; then
+        case "$_unm" in '') _say="no answer" ;; *) _say="$_unm unmeasured" ;; esac
+        nmlog "card: plan check had an unmeasured row, re-asked $_try time(s), now $_say"
+    fi
+    unset _try _say
     case "$_unm" in ''|*[!0-9]*) _unm=0 ;; esac
     case "$_err$_wrn" in
         ''|*[!0-9]*) _docok=0; _err=0; _wrn=0 ;;
@@ -396,6 +431,8 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     esac
     unset _doc
     _health_fresh && _hfresh=1 || _hfresh=0
+    # A checkwatch run (the WebUI) can have written a fresh health.txt since _hv was read.
+    [ "$_hfresh" = 1 ] && _hv=$(_health_get verdict)
     _cons=$(_health_get consistency)
     case "$_cons" in
         ok|unchecked*|"") _consbad=0 ;;
@@ -460,24 +497,18 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         _mul=""
     fi
     if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
-    elif [ "${_nmlrc:-0}" -ne 0 ]; then _mark="✅"
-    elif [ "${_rules:-0}" = 0 ]; then _mark="ℹ️"
-    else _mark="✅"; fi
+    elif [ "$_health" = healthy ] && [ "${_nmlrc:-0}" -eq 0 ] && [ "${_rules:-0}" -gt 0 ] 2>/dev/null; then _mark="✅"
+    else _mark="ℹ️"; _health=${_health#ℹ️ }; fi
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ "${_nmlrc:-0}" -ne 0 ]; then
         _rphr="rule count unavailable"
     else
         _rphr="$_rules rules · $_rro RRO$_wof"
     fi
-    # Timed, like the identical call in metamount.sh: it is a description card and is never
-    # worth hanging on. `env` because nmto execs "$@", so a VAR=val prefix would be taken
-    # as the command name. This copy was the one left untimed.
-    if nmto 10 env KSU_MODULE=meta-nomount ksud module config set --temp \
-            override.description "$_mark $_rphr · $_mstate - $_health$_muc" \
-            >/dev/null 2>&1; then
+    if nm_card "$_mark $_rphr · $_mstate - $_health$_muc"; then
         nmlog "card refreshed ($_rphr, $_mstate, $_health$_mul)"
     else
-        nmlog "⚠ could not write the module description card (ksud slow or refused)"
+        nmlog "⚠ could not write the module description card (manager slow or refused)"
     fi
 fi
 exit 0

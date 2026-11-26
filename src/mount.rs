@@ -229,6 +229,22 @@ fn is_boot_critical(target: &Path) -> bool {
     }
 }
 
+/// `/system/system_ext/…` read as `/system_ext/…`: on a device where that partition is a
+/// directory of /system (or /odm one of /vendor), the name-based refusals saw only the
+/// literal path and let a whole partition or its libraries be hidden.
+fn fold_nested_partition(target: &Path) -> Option<PathBuf> {
+    let mut parts = target.components();
+    parts.next()?;
+    let outer = parts.next()?.as_os_str().to_str()?;
+    let inner = parts.next()?.as_os_str().to_str()?;
+    let nested = match outer {
+        "system" => ["system_ext", "product", "vendor"].contains(&inner),
+        "vendor" => inner == "odm",
+        _ => false,
+    };
+    nested.then(|| Path::new("/").join(inner).join(parts.as_path()))
+}
+
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
@@ -239,9 +255,12 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     if is_partition_root(target) {
         return Err("a bare partition root (masking one bootloops zygote)");
     }
-    if is_boot_critical(target) {
-        return Err("a path init, the linker or zygote cannot start without (masking it bootloops \
-                    the device)");
+    // The bare nested root (`/system/vendor`) stays allowed: validate() refuses it when it
+    // resolves to a partition root, and as a plain directory it is a debloat target.
+    let folded = fold_nested_partition(target);
+    if std::iter::once(target).chain(folded.as_deref()).any(is_boot_critical) {
+        return Err("a path init, the linker or zygote cannot start without (masking it \
+                    bootloops the device)");
     }
     Ok(())
 }
@@ -304,6 +323,16 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
 /// these produced a rule the planner exists to refuse -- most seriously a symlink resolving
 /// into a world-writable place (under /data but not /data/adb, or shared storage), where a
 /// non-root process would control the bytes served at a ROM path.
+/// A FIFO, socket or device node (a 0:0 character device is a whiteout marker, handled
+/// before this). The engine serves it with regular-file ops while stat reports the real
+/// type, and opening a FIFO blocks with no writer.
+fn special_file(ft: &fs::FileType) -> bool {
+    ft.is_fifo() || ft.is_socket() || ft.is_block_device() || ft.is_char_device()
+}
+
+const SPECIAL_WHY: &str = "it is a FIFO, socket or device node, which the engine would serve \
+                           as a regular file while stat still reports its real type";
+
 pub(crate) fn absorb_refusal(source: &Path) -> Option<&'static str> {
     let Ok(md) = fs::symlink_metadata(source) else {
         return Some("its type could not be read");
@@ -316,6 +345,9 @@ pub(crate) fn absorb_refusal(source: &Path) -> Option<&'static str> {
     if is_whiteout_marker(&ft, source) {
         return Some("it is a character-device whiteout marker, which only means something \
                      inside a module tree");
+    }
+    if special_file(&ft) {
+        return Some(SPECIAL_WHY);
     }
     if ft.is_symlink() {
         let resolved = fs::canonicalize(source).ok();
@@ -333,6 +365,12 @@ pub(crate) fn absorb_refusal(source: &Path) -> Option<&'static str> {
 
 fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
+}
+
+/// Whether a source, followed to where it really is, sits where a non-root process can
+/// write it. An unresolvable source is left to the caller's own existence check.
+pub(crate) fn source_is_untrusted(source: &Path) -> bool {
+    fs::canonicalize(source).ok().as_deref().map(resolved_source_is_untrusted).unwrap_or(false)
 }
 
 fn resolved_source_is_untrusted(resolved: &Path) -> bool {
@@ -692,6 +730,15 @@ fn plan_tree(
                 kind: PlanKind::Whiteout,
             });
         } else {
+            if special_file(&ft) {
+                eprintln!("nomount: {module}: skipping {} - {SPECIAL_WHY}", source.display());
+                refused.push(Refused {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    why: SPECIAL_WHY,
+                });
+                continue;
+            }
             if ft.is_symlink() {
                 let resolved = fs::canonicalize(&source).ok();
                 if resolved.as_deref().map(resolved_source_is_untrusted).unwrap_or(false) {
@@ -884,9 +931,24 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
 }
 
 pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
-    let edits = Nm::new().list().map(|l| EngineEdits::from_list(&l)).unwrap_or_default();
+    // Not fatal: the boot pass must still serve. Without the listing a `.replace` cannot
+    // tell the engine's own entries from stock ones, so say so.
+    let edits = match Nm::new().list_retry() {
+        Ok(l) => EngineEdits::from_list(&l),
+        Err(e) => {
+            eprintln!(
+                "nomount: nm list failed ({e:#}) - a .replace this pass may count the engine's \
+                 own entries as stock ones"
+            );
+            EngineEdits::default()
+        }
+    };
     collect_plan_with(&edits)
 }
+
+/// The `why` of a module whose root could not be listed. Reload keeps that module's live
+/// rules rather than pruning them as an intentional unload.
+const UNLISTABLE: &str = "the module directory could not be listed; its live rules are kept";
 
 fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     let blocklist = load_blocklist();
@@ -895,7 +957,9 @@ fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Re
     let mut skipped = 0u32;
     let dirs = fs::read_dir(MODULES_DIR)
         .with_context(|| format!("cannot enumerate {MODULES_DIR} -- refusing to treat that as \"no modules installed\", which would clear every rule"))?;
-    let mut dirs: Vec<_> = dirs.flatten().collect();
+    let mut dirs: Vec<_> = dirs
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("cannot enumerate {MODULES_DIR} in full"))?;
     dirs.sort_by_key(|e| e.file_name());
     for entry in dirs {
         let mdir = entry.path();
@@ -918,8 +982,17 @@ fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Re
             continue;
         }
         let id = id.to_string();
-        if let Ok(entries) = fs::read_dir(&mdir) {
-            let mut entries: Vec<_> = entries.flatten().collect();
+        // One unreadable module must not stop the others being served, and it must not read
+        // as "this module ships nothing" either: recorded, so reload keeps its rules.
+        let listed = fs::read_dir(&mdir).and_then(|d| d.collect::<std::io::Result<Vec<_>>>());
+        if let Err(err) = &listed {
+            eprintln!(
+                "nomount: {id}: cannot list {} ({err}) - its rules are left as they are",
+                mdir.display()
+            );
+            refused.push(Refused { module: id.clone(), target: mdir.clone(), why: UNLISTABLE });
+        }
+        if let Ok(mut entries) = listed {
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -953,6 +1026,61 @@ fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Re
     Ok((plan, skipped, refused))
 }
 
+/// A plan entry on a target absorb has also recorded, with a different source. Absorbed
+/// rules are added first and the plan's replaces them, so the plan source is what serves.
+/// The same source is the common, harmless case: a module that ships a file and also
+/// binds it. Absorbed rules on ROM targets are never scoped (only /data/app APKs are), so
+/// there is no apkscope exposure either way. Reported, not fatal: refusing to serve over
+/// a reporting feature would be the worse failure.
+fn report_absorbed_overlap(plan: &[PlanEntry]) {
+    match crate::absorb::read_absorbed_pairs() {
+        Ok(pairs) => {
+            for e in plan {
+                let Some((_, src)) = pairs.iter().find(|(t, _)| *t == e.target) else {
+                    continue;
+                };
+                if *src == e.source {
+                    continue;
+                }
+                eprintln!(
+                    "nomount: {} is served from {} by {}, replacing the absorbed rule for {} on \
+                     every pass. Drop it from the module, or from absorbed.list.",
+                    e.target.display(),
+                    e.source.display(),
+                    e.module,
+                    src.display()
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "nomount: cannot read the absorbed-rule record ({e:#}) - a module plan entry on an \
+             absorbed target is not reported this pass"
+        ),
+    }
+}
+
+/// An absorbed inject beats a whiteout on the same path, as `whiteout apply` already has it.
+/// Without one precedence the boot pass, reload and absorb took turns replacing each
+/// other's rule, so the path flipped between hidden and served on every pass.
+fn yield_whiteouts_to_absorbed(plan: Vec<PlanEntry>) -> Vec<PlanEntry> {
+    let Ok(absorbed) = crate::absorb::read_absorbed_targets() else {
+        return plan;
+    };
+    plan.into_iter()
+        .filter(|e| {
+            let yields = e.kind == PlanKind::Whiteout && absorbed.contains(&e.target);
+            if yields {
+                eprintln!(
+                    "nomount: the whiteout on {} from {} yields to its absorbed rule",
+                    e.target.display(),
+                    e.module
+                );
+            }
+            !yields
+        })
+        .collect()
+}
+
 pub fn run_plan() -> Result<()> {
     let (plan, skipped, refused) = collect_plan()?;
     // `plan` is the diagnostic a user runs to understand what a pass WILL do, and it was
@@ -960,6 +1088,7 @@ pub fn run_plan() -> Result<()> {
     // only the winner, with no hint that anything had been dropped. run_mount and
     // run_reload both report them.
     let (plan, collisions) = dedupe_by_target(plan);
+    report_absorbed_overlap(&plan);
     for e in &plan {
         let k = match e.kind {
             PlanKind::Inject => "inject",
@@ -1081,6 +1210,7 @@ pub fn run_reload() -> Result<()> {
     // put there (an absorbed APK rule under apkscope), not another writer's.
     let mut absorbed = crate::absorb::read_absorbed_targets()
         .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
+    let absorbed_injects = absorbed.clone();
     absorbed.extend(
         crate::absorb::read_absorbed_tmpfs_targets()
             .context("cannot read the ROM-tmpfs takeover record - refusing to reload, because an empty record here would prune every takeover whiteout")?,
@@ -1092,7 +1222,10 @@ pub fn run_reload() -> Result<()> {
     // while the file behind it is not, and the live rule text cannot show that.
     let last_served = crate::rulestate::read();
 
-    let (plan, skipped, _refused) = collect_plan_with(&EngineEdits::from_list(&live_txt))?;
+    let (plan, skipped, refused) = collect_plan_with(&EngineEdits::from_list(&live_txt))?;
+    let plan = yield_whiteouts_to_absorbed(plan);
+    let unlisted: Vec<PathBuf> =
+        refused.iter().filter(|r| r.why == UNLISTABLE).map(|r| r.target.clone()).collect();
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
         eprintln!(
@@ -1126,6 +1259,7 @@ pub fn run_reload() -> Result<()> {
             .context("cannot read the durable whiteout list - refusing to reload, because an empty list here would prune every whiteout")?
             .into_iter()
             .map(PathBuf::from)
+            .filter(|w| !absorbed_injects.contains(w))
             .collect(),
         &plan,
     )
@@ -1220,6 +1354,17 @@ pub fn run_reload() -> Result<()> {
         let wanted = desired_hookless.contains_key(t.as_path());
         if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
+        }
+        // A module that could not be listed is not unloaded. A whiteout names no source to
+        // attribute, so while any module is unlisted they all stay this pass.
+        if !unlisted.is_empty() {
+            let keep = match live.get(&(t.clone(), *uid)) {
+                Some(LiveRule::Inject(src)) => unlisted.iter().any(|m| src.starts_with(m)),
+                _ => true,
+            };
+            if keep {
+                continue;
+            }
         }
         if nm.del_any(t).is_ok() {
             removed += 1;
@@ -1396,38 +1541,8 @@ pub fn run_mount() -> Result<()> {
         );
     }
 
-    // A module plan entry on a target absorb has already taken over was invisible here:
-    // dedupe_by_target only sees collisions WITHIN the plan, and run_reload is the only
-    // pass that ever read the absorbed record (it needs it to decide what not to prune).
-    // An absorbed APK rule is scoped under apkscope; a plan rule is uid 0, so if the plan
-    // one ends up serving, the apps the operator excluded can see the content again.
-    //
-    // REPORTED, not reordered. Dropping the plan entry is the other option, but a module
-    // is the original owner of its own content and absorb only took over a bind it found,
-    // so which should win is a policy question -- and I have not verified what the engine
-    // does when a uid-0 rule meets a scoped one on the same vpath. Making it visible is
-    // the part that is unambiguously right.
-    //
-    // Non-fatal, unlike run_reload's read of the same record: there it decides what to
-    // prune, here only what to print, and refusing to serve at boot over a reporting
-    // feature would be the worse failure.
-    match crate::absorb::read_absorbed_targets() {
-        Ok(absorbed) => {
-            for e in plan.iter().filter(|e| absorbed.contains(&e.target)) {
-                eprintln!(
-                    "nomount: {} is already served as an absorbed rule and {} claims it too \
-                     - if the plan rule wins it serves UNSCOPED, so the apps in apkscope see \
-                     it again. Drop it from the module, or from absorbed.list.",
-                    e.target.display(),
-                    e.module
-                );
-            }
-        }
-        Err(e) => eprintln!(
-            "nomount: cannot read the absorbed-rule record ({e:#}) - a module plan entry on an \
-             absorbed target is not reported this pass"
-        ),
-    }
+    let plan = yield_whiteouts_to_absorbed(plan);
+    report_absorbed_overlap(&plan);
 
     if let Err(e) = write_module_summary(&plan) {
         eprintln!("nomount: could not write {MODULE_SUMMARY}: {e} - per-module badges will be stale");
@@ -1472,18 +1587,20 @@ pub fn run_mount() -> Result<()> {
             Vec::new()
         }
     };
+    let mut reserve_failed = 0u32;
     if !recorded.is_empty() {
-        let n = crate::absorb::reapply_absorbed_pairs(&nm, &recorded);
+        let (n, failed) = crate::absorb::reapply_absorbed_pairs(&nm, &recorded);
         if n > 0 {
             println!("nomount: re-served {n} absorbed APK rule(s) from the record");
         }
+        reserve_failed = failed;
     }
 
     let mut served: HashSet<&str> = HashSet::new();
     let mut binds = 0u32;
     let mut st = Stats {
         applied: 0,
-        failed: 0,
+        failed: reserve_failed,
         whiteouts: 0,
     };
     let mut applied_apks: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -1554,7 +1671,8 @@ pub fn run_mount() -> Result<()> {
     // Re-read rather than reusing `mounted`: the apply loop above has been unmounting and
     // binding, so the snapshot taken before it is stale by exactly the rows that matter.
     let mounted_now = crate::absorb::mounted_targets().unwrap_or_else(|| mounted.clone());
-    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm, &mounted_now);
+    let (tmpfs_hidden, tmpfs_failed) = crate::absorb::reapply_tmpfs_whiteouts(&nm, &mounted_now);
+    st.failed += tmpfs_failed;
     let (ksu_umount, _) = crate::bind::register_try_umount();
 
     crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
@@ -1842,38 +1960,68 @@ mod tests {
 
     const METAMOUNT_SRC: &str = include_str!("../module/metamount.sh");
 
+    /// The ordinals of the C enum whose body names `first`, keyed by member name with
+    /// `prefix` removed. Comments are stripped and `NAME = n` resets the counter, so a
+    /// member added with a trailing comment still shifts every number after it.
+    fn c_enum_ordinals(src: &str, first: &str, prefix: &str) -> HashMap<String, u32> {
+        let mut text = String::new();
+        let mut rest = src;
+        while let Some(i) = rest.find("/*") {
+            text.push_str(&rest[..i]);
+            rest = rest[i + 2..].find("*/").map_or("", |j| &rest[i + 2 + j + 2..]);
+        }
+        text.push_str(rest);
+        let text: String = text
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut ord = HashMap::new();
+        let Some(at) = text.find(first) else { return ord };
+        let open = text[..at].rfind('{').map_or(0, |o| o + 1);
+        let close = text[at..].find('}').map_or(text.len(), |c| at + c);
+        let mut next = 0u32;
+        for member in text[open..close].split(',') {
+            let member = member.trim();
+            if member.is_empty() {
+                continue;
+            }
+            let (name, value) = match member.split_once('=') {
+                Some((n, v)) => (n.trim(), v.trim().parse::<u32>().ok()),
+                None => (member, None),
+            };
+            if let Some(v) = value {
+                next = v;
+            }
+            if let Some(short) = name.strip_prefix(prefix) {
+                ord.insert(short.to_string(), next);
+            }
+            next += 1;
+        }
+        ord
+    }
+
+    #[test]
+    fn the_enum_reader_counts_commented_and_assigned_members() {
+        let src = "enum {\n    X_UNSPEC = 0,\n    X_A,\n    X_NEW, /* added */\n    /* block\n       comment */\n    X_B, // tail\n    X_C = 9,\n    X_D,\n};";
+        let o = c_enum_ordinals(src, "X_UNSPEC", "X_");
+        let got: Vec<(String, u32)> = ["A", "NEW", "B", "C", "D"]
+            .iter()
+            .map(|k| (k.to_string(), o.get(*k).copied().unwrap_or(u32::MAX)))
+            .collect();
+        assert_eq!(
+            got,
+            [("A", 1), ("NEW", 2), ("B", 3), ("C", 9), ("D", 10)]
+                .map(|(k, v)| (k.to_string(), v))
+        );
+    }
+
     #[test]
     fn the_wire_attribute_numbers_nm_hardcodes_match_the_engine_enum() {
         const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
         const NM_C: &str = include_str!("../userspace/src/nm.c");
 
-        // Read the enum's ordinals out of the header: UNSPEC is pinned at 0 and every
-        // member after it takes the next value.
-        let mut ord: HashMap<&str, u32> = HashMap::new();
-        let mut next = 0u32;
-        let mut inside = false;
-        for line in NOMOUNT_H.lines() {
-            let t = line.trim();
-            if t.starts_with("NOMOUNT_ATTR_UNSPEC") {
-                inside = true;
-                ord.insert("UNSPEC", 0);
-                next = 1;
-                continue;
-            }
-            if !inside {
-                continue;
-            }
-            if t.starts_with("__NOMOUNT_ATTR_MAX") {
-                break;
-            }
-            if let Some(rest) = t.strip_prefix("NOMOUNT_ATTR_") {
-                let name = rest.trim_end_matches(',').trim();
-                if !name.is_empty() && !name.contains(' ') {
-                    ord.insert(name, next);
-                    next += 1;
-                }
-            }
-        }
+        let ord = c_enum_ordinals(NOMOUNT_H, "NOMOUNT_ATTR_UNSPEC", "NOMOUNT_ATTR_");
         assert!(
             ord.len() > 1,
             "could not read the NOMOUNT_ATTR enum out of hookless/src/nomount.h, so this \
@@ -1929,6 +2077,63 @@ mod tests {
     }
 
     #[test]
+    fn the_command_and_knob_numbers_nm_hardcodes_match_the_engine_enums() {
+        const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
+        const NM_C: &str = include_str!("../userspace/src/nm.c");
+
+        // nm.c sends both by bare integer, and these two enums have already been through a
+        // retire/un-retire cycle with nothing but a comment guarding the numbers.
+        let cmd = c_enum_ordinals(NOMOUNT_H, "NM_CMD_UNSPEC", "NM_CMD_");
+        for (name, want) in [
+            ("GET_VERSION", 1u32),
+            ("ADD_RULE", 2),
+            ("DEL_RULE", 3),
+            ("CLEAR_ALL", 4),
+            ("ADD_UID", 5),
+            ("DEL_UID", 6),
+            ("GET_LIST", 7),
+            ("GET_UIDS", 8),
+            ("SET_KNOB", 9),
+            ("GET_PATHHIDE", 10),
+            ("GET_GHOST", 11),
+        ] {
+            assert_eq!(
+                cmd.get(name).copied(),
+                Some(want),
+                "NM_CMD_{name} is no longer {want} in hookless/src/nomount.h, and \
+                 userspace/src/nm.c sends that number"
+            );
+        }
+        let knob = c_enum_ordinals(NOMOUNT_H, "NM_KNOB_RESERVED_0", "NM_KNOB_");
+        for (name, want) in
+            [("VDIR_EROFS_SIZE", 4u32), ("HIDE_ISOLATED", 5), ("PATHHIDE", 6), ("GHOST", 7)]
+        {
+            assert_eq!(
+                knob.get(name).copied(),
+                Some(want),
+                "NM_KNOB_{name} is no longer {want} in hookless/src/nomount.h, and \
+                 userspace/src/nm.c sends that number"
+            );
+        }
+        for lit in [
+            "int target_cmd = 2 + (cmd == 'd');",
+            "do_nm_cmd(fd,6 - (cmd == 'b'), 4,",
+            "do_nm_cmd(fd, 9, 6,",
+            "do_nm_cmd(fd,4, 0,",
+            "do_nm_cmd_multi(fd, (cmd == 'A') ? 2 : 3,",
+            "do_nm_cmd(fd, 1, 0,",
+            "is_gh ? 11 : is_ph ? 10 : is_uids ? 8 : 7",
+            "{ \"d\", 4 }, { \"i\", 5 }, { \"p\", 6 }, { \"g\", 7 },",
+        ] {
+            assert!(
+                NM_C.contains(lit),
+                "userspace/src/nm.c no longer contains `{lit}`; the numbers pinned in this \
+                 test are not the ones it puts on the wire"
+            );
+        }
+    }
+
+    #[test]
     fn the_case_sweep_gate_is_wired_into_ci() {
         const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
         const SWEEP: &str = include_str!("../scripts/case-sweep.py");
@@ -1952,35 +2157,51 @@ mod tests {
         // pinned, so an edit to build.yaml could drop any of these and every test here
         // would still pass -- a gate nobody runs is indistinguishable from a gate that
         // cannot fail, which is the whole class this block exists to prevent.
+        // Whole run lines, not paths: the shellcheck line names gate-sweep.sh and the zig
+        // line names nm-parse-check.c, so a path test passed with both gates deleted.
+        let runs = |line: &str| BUILD_YAML.lines().any(|l| l.trim() == line);
         for (needle, what) in [
             (
-                "tests/lkm-load.sh",
+                "run: sh tests/lkm-load.sh",
                 "the LKM loader suite: KMI selection, the keep-the-device-.ko-on-update rule \
                  and the prune",
             ),
             (
-                "scripts/webui-loadorder.js",
+                "run: node scripts/webui-loadorder.js",
                 "the WebUI load-order and built-command gate: every part's dependencies and \
                  whether each command it assembles still parses as shell",
             ),
             (
-                "tests/nm-parse-check.c",
+                "\"$RUNNER_TEMP/nm-parse-check\"",
                 "the host check of nm's --uid-excluded parsing, the contract Morphe's \
                  \"NoMount only\" installs depend on, plus do_nm_cmd's single-attribute \
                  bound -- without it an over-length payload overflows tx_buf again",
             ),
             (
-                "scripts/contract-sweep.py quoting",
+                "run: python3 scripts/contract-sweep.py quoting",
                 "the WebUI root-call quoting sweep: every value interpolated or \
                  concatenated into a root shell string goes through shq(), which is \
                  otherwise only a convention",
             ),
         ] {
             assert!(
-                BUILD_YAML.contains(needle),
+                runs(needle),
                 "build.yaml no longer runs {needle}, so {what} stops being checked on every push"
             );
         }
+        assert!(
+            runs(r#"python3 scripts/case-sweep.py "$base..$sha""#),
+            "build.yaml no longer runs the case sweep over the pushed range"
+        );
+        let test_job = BUILD_YAML
+            .split_once("\n  test:")
+            .and_then(|(_, rest)| rest.split_once("\n  build:"))
+            .map(|(job, _)| job)
+            .expect("build.yaml has a test job followed by the build job");
+        assert!(
+            !test_job.contains("continue-on-error"),
+            "a step in the test job may fail without failing the job, so its gate cannot fail"
+        );
         let branches = BUILD_YAML
             .lines()
             .find(|l| l.trim_start().starts_with("branches:"))
@@ -2090,6 +2311,7 @@ mod tests {
             ("PM_REGISTERED_EXEMPT", crate::nm::caps::PM_REGISTERED_EXEMPT),
             ("PUBLIC_ON_READ_PATHS", crate::nm::caps::PUBLIC_ON_READ_PATHS),
             ("GHOST_CONTROL_PLANE", crate::nm::caps::GHOST_CONTROL_PLANE),
+            ("UID_SCOPE", crate::nm::caps::UID_SCOPE),
         ] {
             assert!(
                 v <= wire,
@@ -2230,11 +2452,10 @@ mod tests {
         for lit in [
             "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
             r"IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+",
-            // `!IS_ENABLED(CONFIG_X)` is a negative gate, but it is also matched by the
-            // IS_ENABLED grep above, so without it here the symbol landed in the POSITIVE
-            // set and the matrix demanded CONFIG_X=y -- the opposite of what the code
-            // needs, failing every leg.
-            "(ifndef|![[:space:]]*(defined|IS_ENABLED))",
+            // The negative form, matched per token: `!IS_ENABLED(CONFIG_X)` is also matched by
+            // the IS_ENABLED grep above, and a line-level match dropped the positive half of
+            // `defined(CONFIG_A) && !defined(CONFIG_B)`.
+            r"(ifndef[[:space:]]+|![[:space:]]*(defined[[:space:]]*\(?|IS_ENABLED\()[[:space:]]*)CONFIG_[A-Z0-9_]+",
         ] {
             assert!(
                 ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),
@@ -2245,7 +2466,7 @@ mod tests {
             );
         }
         assert!(
-            BUILD_YAML.contains("scripts/gate-sweep.sh"),
+            BUILD_YAML.lines().any(|l| l.trim() == "run: bash scripts/gate-sweep.sh"),
             "nothing runs the config-gate sweep any more, so its copy of the extractor is \
              unexercised and the matrix copy is pinned to an untested reference"
         );
@@ -2288,11 +2509,17 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert!(keys.len() > 10, "COMMANDS parsed as {} keys - the parser has drifted", keys.len());
+        const SYNTHETIC: &str = include_str!("../scripts/webui-fixtures/clean.json");
         for k in keys {
             assert!(
                 stub.contains(&format!("key = '{k}'")),
                 "COMMANDS has {k:?} and the stub has no branch for it, so the page gets rc=1 \
                  for that command and renders its unreadable path instead of the captured one"
+            );
+            assert!(
+                SYNTHETIC.contains(&format!("\"{k}\":")),
+                "COMMANDS has {k:?} and scripts/webui-fixtures/clean.json does not answer it, \
+                 so the README screenshots render that command as unreadable"
             );
         }
     }
@@ -2733,6 +2960,18 @@ mod tests {
             "the page's per-module mount count and webui-harness.py's `modules` command have \
              drifted, so the harness replays counts the page's own command would not produce"
         );
+        // The trailer the page refuses a module list without: a harness command that lost
+        // it rendered Modules as "could not be read" on every fixture, fresh or not.
+        let trailer = r#"echo "$id|$st|$mnt"; done; echo "done=1""#;
+        assert!(
+            PAGE.contains(trailer) && HARNESS_SRC.contains(trailer),
+            "the `modules` command lost its done=1 trailer on one side"
+        );
+        let absorbed = "[ -e /data/adb/nomount/absorbed.list ] || exit 0; ";
+        assert!(
+            PAGE.contains(absorbed) && HARNESS_SRC.contains(absorbed),
+            "the page's absorbed-list probe and the harness's `absorbedlist` have drifted"
+        );
     }
 
     fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
@@ -2923,6 +3162,11 @@ mod tests {
         assert!(absorb_refusal(&dirlink).is_some(), "a symlink to a directory must be refused");
 
         assert!(absorb_refusal(&d.path().join("nope")).is_some(), "a missing source is refused");
+
+        let fifo = d.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        assert!(absorb_refusal(&fifo).is_some(), "a FIFO would be served as a regular file");
     }
 
     #[test]
@@ -3006,6 +3250,18 @@ mod tests {
         assert!(can_whiteout(Path::new("/my_product/app/Foo")).is_ok());
         assert!(can_whiteout(Path::new("/product/app/AIMemory")).is_ok());
         assert!(can_whiteout(Path::new("/system/priv-app/Foo")).is_ok());
+    }
+
+    #[test]
+    fn whiteout_refuses_a_partition_nested_in_system_or_vendor() {
+        for p in [
+            "/system/system_ext/lib64/libc++.so",
+            "/system/product/lib64/libx.so",
+            "/vendor/odm/lib64/libfoo.so",
+        ] {
+            assert!(can_whiteout(Path::new(p)).is_err(), "{p} must be refused");
+        }
+        assert!(can_whiteout(Path::new("/system/system_ext/app/Foo")).is_ok());
     }
 
     #[test]

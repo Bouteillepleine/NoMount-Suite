@@ -14,8 +14,9 @@ Start here:
   nomount uid block <pkg>    hide everything the Suite serves from one app
   nomount uid ksu on         hide from whoever KernelSU's DenyList covers
 
-The boot scripts run `mount`, `absorb`, `reload` and `ghost sync` themselves;
-you rarely need those by hand."
+The boot scripts run `absorb` and `reload` themselves; you rarely need those by hand.
+Boot-only verbs, not listed above: mount, unbind, ghost, pathhide, absorb --early,
+uid apply --early."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -25,6 +26,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// The boot pass: classify enabled modules and route them into Prism injections
+    #[command(hide = true)]
     Mount,
     /// Live engine rules - add, remove or inspect one injection at a time
     Vfs {
@@ -46,7 +48,7 @@ pub enum Commands {
         #[arg(long)]
         include_dirs: bool,
         /// The pre-zygote pass: may take my_* mounts, which the runtime pass refuses
-        #[arg(long)]
+        #[arg(long, hide = true)]
         early: bool,
     },
     /// The durable hide-a-path list, re-applied on every boot
@@ -58,11 +60,12 @@ pub enum Commands {
     #[command(after_help = "\
 Verdicts: FAIL, REBOOT, UNMEASURED, WARN, PASS, N/A, NOTE. \"nothing to test\" and
 \"something stopped me testing\" are deliberately different, and neither is a pass.
-Exits 1 on a FAIL.
+Exits 1 on a FAIL or a REBOOT. A WARN or an UNMEASURED row exits 0, or 2 with --strict.
 
   nomount check              both sections
   nomount check --device     only what can be measured on this device
-  nomount check --json       machine-readable, for a script or a bug report")]
+  nomount check --json       machine-readable, for a script or a bug report
+  nomount check --strict     for scripts: 0 only for a complete run with no WARN")]
     Check {
         /// Static only: does the module set resolve into a bad rule?
         #[arg(long)]
@@ -76,6 +79,9 @@ Exits 1 on a FAIL.
         /// Also write the report to /data/adb/nomount for the WebUI to read
         #[arg(long)]
         write: bool,
+        /// Exit 2 when nothing failed but a WARN or an UNMEASURED row leaves it not clean
+        #[arg(long)]
+        strict: bool,
     },
     /// Print what the mount pass would resolve to, without applying it
     Plan,
@@ -85,12 +91,13 @@ Exits 1 on a FAIL.
     Snapshot,
     /// Diff live against the snapshot baseline and name what drifted
     Verify,
-    /// Dump diagnostics to a folder for a bug report
+    /// Dump diagnostics to a folder, and a .zip of it, for a bug report
     #[command(after_help = "\
 On shared storage (/sdcard) and under /data/local/tmp everything naming the apps you
 hide is withheld - the hide-list files, spoof.conf, boot.log, and dmesg-nomount.txt is
-replaced by a stub - and the bundle says so. Under /data/local/tmp the bundle belongs to
-shell (uid 2000, folder 0700, files 0600), so adb pull works and apps cannot read it.
+replaced by a stub - and WITHHELD.txt in the bundle says so. Under /data/local/tmp
+the bundle belongs to shell (uid 2000, folder 0700, files 0600), so adb pull works and
+apps cannot read it.
 Export to a private path (e.g. /data/adb/nomount/report) to include them; that bundle is
 root-only.")]
     Export {
@@ -98,16 +105,19 @@ root-only.")]
         dir: Option<String>,
     },
     /// The existence cloak: make injected-only paths look absent, not merely unreadable
+    #[command(hide = true)]
     Ghost {
         #[command(subcommand)]
         action: GhostAction,
     },
     /// The maps cloak: keep the root stack's own libraries out of app mapping lists
+    #[command(hide = true)]
     Pathhide {
         #[command(subcommand)]
         action: PathhideAction,
     },
     /// Unmount the real binds recorded in binds.list (the my_* ones)
+    #[command(hide = true)]
     Unbind,
     /// Print the version
     Version,
@@ -199,7 +209,7 @@ and its sandbox.
     /// Re-apply the hide list (run automatically when a package is installed or removed)
     Apply {
         /// The pre-zygote pass
-        #[arg(long)]
+        #[arg(long, hide = true)]
         early: bool,
     },
     /// Add a curated set of known detectors to the hide list
@@ -269,17 +279,19 @@ pub enum WhiteoutAction {
 /// which side it was on. For the bootloop guard that is the failure the guard exists to
 /// prevent: a serving verb silently exempt from it keeps injecting on a device that could
 /// not finish booting three times. The catch-alls are gone, so adding a `Commands` variant
-/// now fails to COMPILE until someone classifies it.
+/// now fails to COMPILE until someone classifies it, and so does a new sub-verb.
 pub fn serves_injections(cmd: &Commands) -> bool {
     match cmd {
         Commands::Mount | Commands::Reload => true,
         Commands::Absorb { dry_run, .. } => !dry_run,
-        Commands::Vfs { action } => {
-            matches!(action, VfsAction::Add { .. } | VfsAction::Whiteout { .. })
-        }
-        Commands::Whiteout { action } => {
-            matches!(action, WhiteoutAction::Add { .. } | WhiteoutAction::Apply)
-        }
+        Commands::Vfs { action } => match action {
+            VfsAction::Add { .. } | VfsAction::Whiteout { .. } => true,
+            VfsAction::Del { .. } | VfsAction::Clear | VfsAction::List => false,
+        },
+        Commands::Whiteout { action } => match action {
+            WhiteoutAction::Add { .. } | WhiteoutAction::Apply => true,
+            WhiteoutAction::Remove { .. } | WhiteoutAction::List | WhiteoutAction::Suggest => false,
+        },
         // Diagnosis, removal and the hide list must stay reachable on a parked device: that
         // is how the operator finds out why it parked and gets out of it. `Unbind` only
         // unmounts what is already recorded, which is removal too.
@@ -298,25 +310,25 @@ pub fn serves_injections(cmd: &Commands) -> bool {
 
 pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
     match cmd {
-        Commands::Uid { action } => matches!(
-            action,
-            UidAction::Block { .. }
-                | UidAction::Unblock { .. }
-                | UidAction::Apply { .. }
-                | UidAction::Ksu { state: Some(_), .. }
-                | UidAction::Preset { name: Some(_), dry_run: false, .. }
-        ),
-        Commands::Vfs { action } => matches!(
-            action,
+        Commands::Uid { action } => match action {
+            UidAction::Block { .. } | UidAction::Unblock { .. } | UidAction::Apply { .. } => true,
+            UidAction::Ksu { state, .. } => state.is_some(),
+            UidAction::Preset { name, dry_run, .. } => name.is_some() && !dry_run,
+            UidAction::List | UidAction::Isolated { .. } => false,
+        },
+        Commands::Vfs { action } => match action {
             VfsAction::Add { .. }
-                | VfsAction::Del { .. }
-                | VfsAction::Whiteout { .. }
-                | VfsAction::Clear
-        ),
-        Commands::Whiteout { action } => matches!(
-            action,
-            WhiteoutAction::Add { .. } | WhiteoutAction::Remove { .. } | WhiteoutAction::Apply
-        ),
+            | VfsAction::Del { .. }
+            | VfsAction::Whiteout { .. }
+            | VfsAction::Clear => true,
+            VfsAction::List => false,
+        },
+        Commands::Whiteout { action } => match action {
+            WhiteoutAction::Add { .. } | WhiteoutAction::Remove { .. } | WhiteoutAction::Apply => {
+                true
+            }
+            WhiteoutAction::List | WhiteoutAction::Suggest => false,
+        },
         Commands::Absorb { dry_run, .. } => !dry_run,
         // Mount and Reload re-derive the cloak themselves at the end of their own pass
         // (ghost::sync_after_pass), so routing them through main.rs's post-command resync
@@ -366,7 +378,7 @@ mod tests {
     #[test]
     fn the_guard_never_blocks_diagnosis_or_removal() {
         for c in [
-            Commands::Check { plan: false, device: false, json: false, write: false },
+            Commands::Check { plan: false, device: false, json: false, write: false, strict: false },
             Commands::Plan,
             Commands::Absorb { dry_run: true, include_dirs: false, early: false },
             Commands::Export { dir: None },
@@ -406,6 +418,8 @@ mod tests {
             Commands::Uid { action: UidAction::Block { target: "com.a".into(), force: false } },
             Commands::Uid { action: UidAction::Unblock { target: "com.a".into() } },
             Commands::Uid { action: UidAction::Apply { early: false } },
+            Commands::Uid { action: UidAction::Apply { early: true } },
+            Commands::Uid { action: UidAction::Ksu { state: Some("on".into()), force: false } },
             Commands::Uid {
                 action: UidAction::Preset {
                     name: Some("detectors".into()),
@@ -443,6 +457,13 @@ mod tests {
             Commands::Uid {
                 action: UidAction::Preset { name: None, dry_run: false, globs: false },
             },
+            Commands::Uid {
+                action: UidAction::Preset {
+                    name: Some("detectors".into()),
+                    dry_run: true,
+                    globs: false,
+                },
+            },
             Commands::Vfs { action: VfsAction::List },
             Commands::Whiteout { action: WhiteoutAction::List },
             Commands::Whiteout { action: WhiteoutAction::Suggest },
@@ -450,7 +471,7 @@ mod tests {
             Commands::Mount,
             Commands::Reload,
             Commands::Plan,
-            Commands::Check { plan: false, device: false, json: false, write: false },
+            Commands::Check { plan: false, device: false, json: false, write: false, strict: false },
             Commands::Snapshot,
             Commands::Verify,
             Commands::Export { dir: None },

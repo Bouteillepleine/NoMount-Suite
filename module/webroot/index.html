@@ -23,7 +23,7 @@
     </div>
     <div class="brand">
       <h1>NoMount Suite</h1>
-      <p><span class="ver" id="ver">v...</span> · <span id="hdreng">engine ...</span><span
+      <p><span class="ver tip" id="ver">v...</span> · <span id="hdreng">engine ...</span><span
         class="stage" id="vstage" hidden> · staged</span></p>
     </div>
     <div class="hbtns">
@@ -112,17 +112,17 @@
     <div class="uidbar">
       <div class="pkgwrap">
         <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-               placeholder="Package name, UID, or glob (*.duckdetector)"
+               placeholder="App package, or a pattern like *.duckdetector"
                data-act-input="pkgFilter" data-act-focus="pkgFilter" data-act-blur="pkgBlur" data-act-key="pkgKey" />
         <div id="pkgdd" class="pkgdd"></div>
       </div>
-      <button class="act" data-act="uidOp" data-arg="block">Hide</button>
+      <button class="act" data-act="uidOp" data-arg="block">Hide from app</button>
       <button class="act" data-act="uidOp" data-arg="unblock">Unhide</button>
     </div>
 
     <div class="presetrow">
       <button class="act" data-act="uidScan">Scan for candidates</button>
-      <button class="act u-hide" id="usShow" data-act="usToggle">Show list</button>
+      <button class="act u-hide" id="usShow" data-act="usToggle">Show candidates</button>
       <button class="act" data-act="addGlobs">Add detector globs</button>
       <span class="presethint">Scan finds what is installed now; globs keep matching what
         installs later.</span>
@@ -172,7 +172,7 @@
   <div class="sec"><i></i><b>What disappears</b></div>
   <div class="card">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleWhiteouts" data-act-key="activateOnEnter">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M3 3l18 18"/></svg>
       <h2>Hidden paths</h2><span class="chip" id="wochip"> - </span><span class="chev">›</span>
     </div>
     <div id="wobody" class="u-hide">
@@ -185,7 +185,7 @@
       <div class="uidbar">
         <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
                placeholder="/system/bin/install-recovery.sh" />
-        <button class="act" data-act="woAdd">Hide</button>
+        <button class="act" data-act="woAdd">Hide this file</button>
         <button class="act" data-act="woScan">Scan this device</button>
       </div>
       <div class="list u-hide" id="woFound"></div>
@@ -208,7 +208,7 @@
              placeholder="Filter by path or module..." data-act-input="filterRules" />
       <button class="act u-flex1" id="rulegroupBtn" data-act="toggleRuleGroup">Group by module</button>
       <button class="act u-flex1" id="rulefileBtn" data-act="toggleFileView">By file</button>
-      <button class="act u-flex1" data-act="clearRuleFilter">Clear</button>
+      <button class="act u-flex1" data-act="clearRuleFilter">Clear filter</button>
     </div>
     <pre class="rules u-hide" id="ruleslist">...</pre>
     <p class="note u-hide" id="rulecount"></p>
@@ -272,10 +272,10 @@
 
     <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note u-mt0"><b>Snapshot</b> freezes today’s fingerprint as the baseline. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a bug-report folder to <code>/sdcard/Download</code>.</p>
+      <p class="note u-mt0"><b>Snapshot</b> freezes today’s fingerprint as the baseline. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a bug-report zip to <code>/sdcard/Download</code>.</p>
       <details class="ndet">
         <summary>What Export writes</summary>
-        <p class="note">Report, fingerprint, rules, mount table. Attach the folder.</p>
+        <p class="note">Report, fingerprint, rules, mount table, as one zip to attach to an issue. For most reports, <b>Copy report</b> above and paste it is enough.</p>
         <p class="note">Hidden app names are omitted when sharing.</p>
       </details>
       <div class="btns u-wrap">
@@ -320,11 +320,11 @@
   <div class="card collapsed u-hide" id="incidentcard">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleCard" data-act-key="activateOnEnter">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-      <h2>Last incident</h2><span class="chip info">guard tripped</span><span class="chev">›</span>
+      <h2>Last incident</h2><span class="chip info" id="incchip">bootloop guard</span><span class="chev">›</span>
     </div>
-    <p class="note">Saved when the bootloop guard fired. Not live state.</p>
+    <p class="note" id="incnote">Saved when the bootloop guard fired. Not live state.</p>
     <pre class="rules" id="incidentout">...</pre>
-    <div class="btns"><button class="act danger" data-act="clearIncident">Clear incident</button></div>
+    <div class="btns"><button class="act" data-act="copyIncident">Copy incident</button><button class="act danger" data-act="clearIncident">Clear incident</button></div>
   </div>
 
   <details class="ndet u-m8x" id="appearance">
