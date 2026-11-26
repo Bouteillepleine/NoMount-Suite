@@ -6,9 +6,17 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 >
-> From the next release, each line is tagged `[engine]`, `[LKM]`, `[Suite]` or
+> From v1.3.218, each line is tagged `[engine]`, `[LKM]`, `[Suite]` or
 > `[WebUI]`, and a release header names the engine build its engine lines need. The
 > WebUI header shows the build you have, e.g. `engine v36 · 1.36.3`.
+
+## v1.3.218 — engine v36 · 1.36.6 ([engine] lines need a rebuilt kernel; the LKM zip carries them)
+
+- [engine] Replaced files answer FIONREAD with the size the caller reads, and a hidden app's lookup no longer shows them as "(deleted)" in other apps' maps.
+- [engine] Directories the engine takes over list, seek and report file flags like stock ones.
+- [LKM] Every module now carries symbol versions, so a kernel it was not built for refuses it instead of loading it, and the 6.18 module loads on 6.18 GKI kernels.
+- [Suite] A shared-storage export says in WITHHELD.txt what it left out.
+- [WebUI] Copied reports no longer name hidden apps.
 
 ## v1.3.217 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
 
