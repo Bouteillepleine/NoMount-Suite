@@ -930,43 +930,177 @@ fn resolve_existing_prefix(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-fn create_export_dir(out: &Path, private: bool, owner: Option<(u32, u32)>) -> std::io::Result<()> {
-    if !private {
-        return fs::create_dir_all(out);
-    }
-    use std::os::unix::fs::DirBuilderExt;
-    let missing: Vec<PathBuf> = out
-        .ancestors()
-        .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
-        .map(Path::to_path_buf)
-        .collect();
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(out)?;
-    if let Some((uid, gid)) = owner {
-        for d in &missing {
-            std::os::unix::fs::lchown(d, Some(uid), Some(gid))?;
-        }
-    }
-    Ok(())
-}
-
-fn write_export_file(
-    path: &Path,
-    content: &[u8],
+/// The bundle's folder, held open by fd. Every file in it is created through that fd with
+/// O_EXCL|O_NOFOLLOW, the zip likewise beside it, and the folders this export made are
+/// handed to shell last, by fd: a path walk after a chown let a shell-planted symlink pick
+/// what root wrote through, and what it then chowned.
+struct ExportDir {
+    anchor: std::os::fd::OwnedFd,
+    created: Vec<std::os::fd::OwnedFd>,
+    leaf: std::os::fd::OwnedFd,
+    name: String,
     private: bool,
     owner: Option<(u32, u32)>,
-) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(if private { 0o600 } else { 0o644 })
-        .open(path)?;
-    if let Some((uid, gid)) = owner {
-        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+    files: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+}
+
+fn cstr(s: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(s.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in a path"))
+}
+
+fn fd_or_err(fd: libc::c_int) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    f.write_all(content)
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// mkdirat, then open what is there without following a link, and insist it is ours: the
+/// name sits in a folder someone else may write to.
+fn mkdir_open_at(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    mode: libc::mode_t,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::AsRawFd;
+    let c = cstr(name)?;
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fd = fd_or_err(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the folder just created was replaced by someone else's",
+        ));
+    }
+    Ok(fd)
+}
+
+impl ExportDir {
+    /// `<base>/<stem>`, or `<stem>-N` when that folder or its zip already exists.
+    fn claim(base: &Path, stem: &str, private: bool, owner: Option<(u32, u32)>) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let mut anchor = base.to_path_buf();
+        let mut missing: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            let probe = if anchor.as_os_str().is_empty() { Path::new(".") } else { anchor.as_path() };
+            if fs::symlink_metadata(probe).is_ok() {
+                anchor = probe.to_path_buf();
+                break;
+            }
+            let name = anchor.file_name().map(|n| n.to_os_string()).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a folder path")
+            })?;
+            missing.push(name);
+            anchor = anchor.parent().map(Path::to_path_buf).unwrap_or_default();
+        }
+        missing.reverse();
+        // The existing part is the caller's own path, links and all.
+        let anchor = fd_or_err(unsafe {
+            libc::open(
+                cstr(anchor.as_os_str())?.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        })?;
+        let mode = if private { 0o700 } else { 0o777 };
+        let mut created: Vec<std::os::fd::OwnedFd> = Vec::new();
+        for n in &missing {
+            let fd = mkdir_open_at(created.last().unwrap_or(&anchor), n, mode)?;
+            created.push(fd);
+        }
+        let base_fd = created.last().unwrap_or(&anchor).as_raw_fd();
+        for i in 0..100 {
+            let name = if i == 0 { stem.to_string() } else { format!("{stem}-{i}") };
+            let zip = cstr(std::ffi::OsStr::new(&format!("{name}.zip")))?;
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstatat(base_fd, zip.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+                continue;
+            }
+            let base = created.last().unwrap_or(&anchor);
+            match mkdir_open_at(base, std::ffi::OsStr::new(&name), mode) {
+                Ok(leaf) => {
+                    return Ok(Self {
+                        anchor,
+                        created,
+                        leaf,
+                        name,
+                        private,
+                        owner,
+                        files: std::cell::RefCell::new(Vec::new()),
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{stem} and 99 numbered folders beside it already exist"),
+        ))
+    }
+
+    fn base(&self) -> &std::os::fd::OwnedFd {
+        self.created.last().unwrap_or(&self.anchor)
+    }
+
+    /// Where the bundle really landed, read back from the fd rather than the path.
+    fn resolved(&self) -> Option<PathBuf> {
+        use std::os::fd::AsRawFd;
+        fs::read_link(format!("/proc/self/fd/{}", self.leaf.as_raw_fd())).ok()
+    }
+
+    fn create_at(&self, dir: &std::os::fd::OwnedFd, name: &str, content: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd;
+        let c = cstr(std::ffi::OsStr::new(name))?;
+        let fd = fd_or_err(unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                (if self.private { 0o600 } else { 0o644 }) as libc::c_uint,
+            )
+        })?;
+        let mut f = fs::File::from(fd);
+        if let Some((uid, gid)) = self.owner {
+            std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+        }
+        f.write_all(content)
+    }
+
+    fn put(&self, name: &str, content: &[u8]) -> std::io::Result<()> {
+        self.create_at(&self.leaf, name, content)?;
+        self.files.borrow_mut().push((name.to_string(), content.to_vec()));
+        Ok(())
+    }
+
+    fn put_zip(&self) -> std::io::Result<()> {
+        let z = stored_zip(&self.files.borrow());
+        self.create_at(self.base(), &format!("{}.zip", self.name), &z)
+    }
+
+    /// Last, once nothing more is written through these folders.
+    fn hand_over(&self) -> std::io::Result<()> {
+        let Some((uid, gid)) = self.owner else { return Ok(()) };
+        for d in std::iter::once(&self.leaf).chain(self.created.iter().rev()) {
+            std::os::unix::fs::fchown(d, Some(uid), Some(gid))?;
+        }
+        Ok(())
+    }
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
@@ -980,19 +1114,14 @@ fn crc32(bytes: &[u8]) -> u32 {
     !c
 }
 
-/// A stored (uncompressed) zip of the files directly in `dir`. An issue takes a file, not a
-/// folder, and the phone that just had the problem has no zip tool. Timestamps are fixed at
+/// A stored (uncompressed) zip of the bundle's files. An issue takes a file, not a folder,
+/// and the phone that just had the problem has no zip tool. Timestamps are fixed at
 /// 1980-01-01, as in scripts/mkzip.py.
-fn stored_zip(dir: &Path) -> std::io::Result<Vec<u8>> {
-    let mut files: Vec<_> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .collect();
-    files.sort_by_key(|e| e.file_name());
+fn stored_zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut files: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     let (mut out, mut central, mut count) = (Vec::new(), Vec::new(), 0u16);
-    for e in files {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let data = fs::read(e.path())?;
+    for (name, data) in files {
         let (crc, size, nlen, off) =
             (crc32(&data), data.len() as u32, name.len() as u16, out.len() as u32);
         const TIME_DATE: [u8; 4] = [0, 0, 0x21, 0];
@@ -1027,7 +1156,7 @@ fn stored_zip(dir: &Path) -> std::io::Result<Vec<u8>> {
     out.extend_from_slice(&cd_len.to_le_bytes());
     out.extend_from_slice(&cd_off.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    Ok(out)
+    out
 }
 
 fn base_unusable(base: &Path) -> Option<String> {
@@ -1069,7 +1198,8 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         ts
     };
     let base = dir.unwrap_or_else(|| "/sdcard/Download".to_string());
-    let out = format!("{base}/nm-diag-{ts}");
+    let stem = format!("nm-diag-{ts}");
+    let out = format!("{base}/{stem}");
     if let Some(why) = base_unusable(Path::new(&base)) {
         anyhow::bail!("cannot export to {base}: {why}");
     }
@@ -1079,13 +1209,18 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     let for_shell = is_for_shell(&resolved, Path::new(&out));
     let private = !shared || for_shell;
     let owner = for_shell.then_some((SHELL_ID, SHELL_ID));
-    create_export_dir(Path::new(&out), private, owner).with_context(|| format!("create {out}"))?;
+    let bundle = ExportDir::claim(Path::new(&base), &stem, private, owner)
+        .with_context(|| format!("create {out}"))?;
+    let out = format!("{base}/{}", bundle.name);
+    // Shell owns folders on that path, so it can swap one for a link between the check
+    // above and the mkdir: the folder handed to shell must still be under /data/local/tmp.
+    if for_shell && !bundle.resolved().is_some_and(|p| p.starts_with(SHELL_TMP)) {
+        anyhow::bail!("cannot export to {base}: the folder did not stay under {SHELL_TMP} while it was created");
+    }
 
     let nm = Nm::new();
     let write = |name: &str, content: &str| {
-        if let Err(e) =
-            write_export_file(&Path::new(&out).join(name), content.as_bytes(), private, owner)
-        {
+        if let Err(e) = bundle.put(name, content.as_bytes()) {
             eprintln!("nomount: export: could not write {name}: {e} - this diagnostic is incomplete");
         }
     };
@@ -1179,11 +1314,12 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     }
     println!("exported to {out}");
     let zip = format!("{out}.zip");
-    match stored_zip(Path::new(&out))
-        .and_then(|z| write_export_file(Path::new(&zip), &z, private, owner))
-    {
+    match bundle.put_zip() {
         Ok(()) => println!("zip: {zip}"),
         Err(e) => eprintln!("nomount: export: could not write {zip}: {e} - attach the folder's files"),
+    }
+    if let Err(e) = bundle.hand_over() {
+        eprintln!("nomount: export: could not hand {out} to shell: {e} - adb pull needs root");
     }
     if let Some(n) = note {
         println!("{n}");
@@ -1307,10 +1443,10 @@ mod zip_tests {
     #[test]
     fn the_export_zip_is_a_valid_stored_archive() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926, "the standard CRC-32 check value");
-        let d = tempfile::tempdir().unwrap();
-        fs::write(d.path().join("b.txt"), b"second").unwrap();
-        fs::write(d.path().join("a.txt"), b"first file").unwrap();
-        let z = stored_zip(d.path()).unwrap();
+        let z = stored_zip(&[
+            ("b.txt".to_string(), b"second".to_vec()),
+            ("a.txt".to_string(), b"first file".to_vec()),
+        ]);
         assert_eq!(&z[..4], b"PK\x03\x04");
         let eocd = &z[z.len() - 22..];
         assert_eq!(&eocd[..4], b"PK\x05\x06");
@@ -1661,18 +1797,41 @@ rules=3
     fn a_private_export_is_root_only() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
+        let b = ExportDir::claim(&d.path().join("report"), "nm-diag-1", true, None).unwrap();
         let out = d.path().join("report").join("nm-diag-1");
-        create_export_dir(&out, true, None).unwrap();
+        b.put("uidhide", b"com.example.bank\n").unwrap();
         let f = out.join("uidhide");
-        write_export_file(&f, b"com.example.bank\n", true, None).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&out), 0o700, "the bundle folder must not be traversable by apps");
         assert_eq!(mode(out.parent().unwrap()), 0o700);
         assert_eq!(mode(&f), 0o600, "the bundle files must not be readable by apps");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
 
-        write_export_file(&f, b"x", true, None).unwrap();
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x", "a rewrite truncates");
+        assert!(b.put("uidhide", b"x").is_err(), "nothing already there is written through");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
+        b.put_zip().unwrap();
+        assert!(d.path().join("report").join("nm-diag-1.zip").is_file());
+    }
+
+    #[test]
+    fn an_export_never_writes_through_a_planted_link() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        // The zip's name is predictable to the second: a link there moves the bundle aside.
+        symlink(&victim, d.path().join("nm-diag-1.zip")).unwrap();
+        std::fs::create_dir(d.path().join("nm-diag-2")).unwrap();
+        let b = ExportDir::claim(d.path(), "nm-diag-1", true, None).unwrap();
+        assert_eq!(b.name, "nm-diag-1-1");
+        let b2 = ExportDir::claim(d.path(), "nm-diag-2", true, None).unwrap();
+        assert_eq!(b2.name, "nm-diag-2-1", "an existing folder is not reused");
+
+        symlink(&victim, d.path().join("nm-diag-1-1").join("rules.txt")).unwrap();
+        assert!(b.put("rules.txt", b"bundle").is_err());
+        b.put("uname.txt", b"u").unwrap();
+        b.put_zip().unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
     }
 
     #[test]
@@ -1683,10 +1842,11 @@ rules=3
         let pre = d.path().join("tmp");
         std::fs::create_dir(&pre).unwrap();
         std::fs::set_permissions(&pre, std::fs::Permissions::from_mode(0o771)).unwrap();
+        let b = ExportDir::claim(&pre.join("nm-report"), "nm-diag-1", true, Some(me)).unwrap();
         let out = pre.join("nm-report").join("nm-diag-1");
-        create_export_dir(&out, true, Some(me)).unwrap();
+        b.put("rules.txt", b"r\n").unwrap();
+        b.hand_over().unwrap();
         let f = out.join("rules.txt");
-        write_export_file(&f, b"r\n", true, Some(me)).unwrap();
         let md = |p: &Path| std::fs::metadata(p).unwrap();
         for p in [out.as_path(), out.parent().unwrap()] {
             assert_eq!(md(p).permissions().mode() & 0o777, 0o700, "{}", p.display());
