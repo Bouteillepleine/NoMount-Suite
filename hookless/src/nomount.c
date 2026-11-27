@@ -2615,6 +2615,69 @@ static void nm_dir_stat_fix(struct nm_inode_info *info, struct inode *v_inode,
     stat->size = fixed;
 }
 
+#define NM_HSIZE_EROFS 1
+#define NM_HSIZE_DELTA 2
+/* The size a served caller of a hijacked directory is told. getattr and llseek both answer
+ * from here: SEEK_END read the victim's own i_size while stat reported the merged one, 531
+ * against 601 on /product/etc/sysconfig (engine-oracles-1). 0 when nothing changes. */
+static int nm_hijacked_dir_size(struct inode *inode, struct nomount_dir_node *d, loff_t real,
+                                s32 delta, loff_t *out)
+{
+    /* erofs: the size of the listing this caller gets, packed the same way, so its
+     * terminal d_off and st_size agree. */
+    if (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1) {
+        unsigned int bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : 4096;
+
+        if (nm_hijacked_erofs_size(d, bs, out))
+            return NM_HSIZE_EROFS;
+    }
+    /* Same gate as nm_dir_stat_fix: a victim left unfixed among fixed children is the tell. */
+    if (delta && (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 ||
+                  READ_ONCE(nm_vdir_erofs_size)) &&
+        real > 0 && real < 4096) {
+        loff_t fixed = real + delta;
+
+        if (fixed > 0 && fixed < 4096) {
+            *out = fixed;
+            return NM_HSIZE_DELTA;
+        }
+    }
+    return 0;
+}
+
+static loff_t nomount_hijacked_llseek(struct file *file, loff_t offset, int whence)
+{
+    struct inode *inode = file_inode(file);
+    const struct file_operations *orig_fop;
+    struct nomount_dir_node *d;
+    struct nm_fop *nm_fop;
+    loff_t res = 0, sz;
+    bool sized = false;
+    int nld;
+    s32 delta;
+
+    rcu_read_lock();
+    nm_fop = nm_get_fop(smp_load_acquire(&file->f_op));
+    orig_fop = nm_fop ? nm_fop->orig_fop : NULL;
+    d = nm_fop ? smp_load_acquire(&nm_fop->dir_node) : NULL;
+    if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
+    rcu_read_unlock();
+
+    if (d && (whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
+        !(nomount_is_uid_blocked(current_uid().val) && !READ_ONCE(d->has_public))) {
+        nm_dir_deltas(d, &nld, &delta);
+        sized = nm_hijacked_dir_size(inode, d, i_size_read(inode), delta, &sz) != 0;
+        if (sized)
+            res = generic_file_llseek_size(file, offset, whence, inode->i_sb->s_maxbytes, sz);
+    }
+    if (d) nm_dir_node_put(d);
+    if (sized)
+        return res;
+    if (orig_fop && orig_fop->llseek)
+        return orig_fop->llseek(file, offset, whence);
+    return generic_file_llseek(file, offset, whence);
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 #else
@@ -2665,28 +2728,18 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (stat->nlink != 1)
         nm_dir_nlink_fix(stat, nld);
 
-    /* erofs: the size of the listing this caller gets, packed the same way, so its
-     * terminal d_off and st_size agree. */
-    if (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1) {
+    {
         loff_t sz;
-        unsigned int bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : 4096;
+        int how = nm_hijacked_dir_size(inode, d, stat->size, delta, &sz);
 
-        if (nm_hijacked_erofs_size(d, bs, &sz)) {
-            if (sz != stat->size) {
-                stat->size = sz;
+        if (how && sz != stat->size) {
+            stat->size = sz;
+            if (how == NM_HSIZE_EROFS) {
+                unsigned int bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : 4096;
+
                 stat->blocks = (blkcnt_t)(round_up(sz, (loff_t)bs) >> 9);
             }
-            goto out;
         }
-    }
-
-    /* Same gate as nm_dir_stat_fix: a victim left unfixed among fixed children is the tell. */
-    if (delta && (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 ||
-                  READ_ONCE(nm_vdir_erofs_size)) &&
-        stat->size > 0 && stat->size < 4096) {
-        loff_t fixed = stat->size + delta;
-        if (fixed > 0 && fixed < 4096)
-            stat->size = fixed;
     }
 out:
     if (d) nm_dir_node_put(d);
@@ -4392,6 +4445,8 @@ static inline int nomount_hijack_virtual_parent(struct nomount_dir_node *dir_nod
 
     if (nm_fop->orig_fop->iterate_shared)
         nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
+    if (nm_fop->orig_fop->llseek)
+        nm_fop->fake_fop.llseek = nomount_hijacked_llseek;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
     if (nm_fop->orig_fop->iterate)
         nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
