@@ -33,23 +33,30 @@ _health_get() {
     sed -n "s/^$1=//p" "$NMDIR/health.txt" 2>/dev/null
 }
 
-i=0
-booted=0
-while [ "$i" -lt 450 ]; do
-    if [ "$(getprop sys.boot_completed)" = "1" ]; then booted=1; break; fi
-    sleep 2
-    i=$((i + 1))
-done
-
-sleep 10
-
 _hookran=1
-_bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 if [ -n "$_bootid" ]; then
     [ "$(cat "$NMDIR/mountpass.ts" 2>/dev/null)" = "$_bootid" ] || _hookran=0
 fi
 _armed=1
 nm_guard_armed || _armed=0
+
+# Only a boot that injected under an armed guard can own a crash loop before boot_completed.
+_soft=0
+[ "$_hookran" = 1 ] && [ "$_armed" = 1 ] && [ ! -e "$NMDIR/disabled" ] && _soft=1
+i=0
+booted=0
+while [ "$i" -lt 450 ]; do
+    if [ "$(getprop sys.boot_completed)" = "1" ]; then booted=1; break; fi
+    if [ "$_soft" = 1 ] && nm_guard_soft_loop "$(getprop sys.system_server.start_count)"; then
+        _soft=0
+    fi
+    sleep 2
+    i=$((i + 1))
+done
+unset _soft
+
+sleep 10
+
 if [ "$_hookran" = 0 ]; then
     nmlog "⛔ the mount pass never ran this boot - nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
     {

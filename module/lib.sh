@@ -390,13 +390,45 @@ nm_guard_bump() {
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
         echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
-        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
-                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
-                basename "$m"
-            done | tr '\n' ' ')"
+        echo "modules_enabled=$(nm_incident_modules)"
         nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
     return 2
+}
+
+nm_incident_modules() {
+    for m in /data/adb/modules/*/; do
+        [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
+        basename "$m"
+    done | tr '\n' ' '
+}
+
+# A system_server crash loop restarts zygote and system_server inside one kernel boot, so
+# post-fs-data never runs again and the boot count above stays at 1 while Android's own
+# rescue escalates towards a factory-reset prompt. $1 = sys.system_server.start_count, 1 on
+# the first start; NM_SOFT_LOOP_MAX starts before boot_completed park the Suite, fewer never
+# do. Parking here also clears the rule table, so the next start reads stock files.
+nm_guard_soft_loop() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge "${NM_SOFT_LOOP_MAX:-4}" ] || return 1
+    [ -e "$NMDIR/disabled" ] && return 1
+    nm_guard_armed || return 1
+    nmlog "⛔ system_server started $1 times before boot completed - parking the Suite and clearing its rules so the next start reads stock files"
+    touch "$NMDIR/disabled" 2>/dev/null \
+        || nmlog "⚠ could not create $NMDIR/disabled - the crash loop was seen but the Suite cannot park itself"
+    sync 2>/dev/null
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "reason=system_server restarted $(($1 - 1)) times before boot completed (start_count=$1, parks at ${NM_SOFT_LOOP_MAX:-4})"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
+        echo "modules_enabled=$(nm_incident_modules)"
+        nm_incident_tombstone
+    } > "$NMDIR/incident.log" 2>/dev/null
+    nmto 15 "$NM_BIN" clear >/dev/null 2>&1 \
+        || nmlog "⚠ could not clear the engine's rules - they stay served until the next boot, which comes up parked"
+    return 0
 }
 
 # The foreground passes returned: this boot stops counting. The late reload/absorb at +45 s

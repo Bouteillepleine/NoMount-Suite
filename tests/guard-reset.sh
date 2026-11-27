@@ -48,6 +48,31 @@ rm -f "$NMDIR/.guard_fg"; nm_guard_late_hold "$c"
 check "the late hold re-arms the count even when the foreground never signalled" "$(cat "$NMDIR/bootcount")" "1"
 fresh; nm_guard_late_hold ""
 check "an unread count holds nothing" "$([ -e "$NMDIR/bootcount" ] && echo held || echo none)" "none"
+
+echo
+echo "system_server crash loop inside one boot"
+soft() { nm_guard_soft_loop "$1" >/dev/null 2>&1 && echo parked || echo running; }
+incident() { [ -e "$NMDIR/incident.log" ] && echo written || echo none; }
+fresh; boot foreground
+check "a healthy start parks nothing" "$(soft 1)" "running"
+check "one restart parks nothing" "$(soft 2)" "running"
+check "two restarts park nothing" "$(soft 3)" "running"
+check "  nor leave an incident" "$(incident)" "none"
+check "a third restart before boot completed parks it" "$(soft 4)" "parked"
+check "  with the guard's own marker" "$(tripped)" "tripped"
+check "  and an incident naming the crash loop" \
+	"$(grep -c '^reason=system_server restarted 3 times before boot completed' "$NMDIR/incident.log")" "1"
+check "  once: a parked Suite is not parked again" "$(soft 9)" "running"
+fresh; boot foreground; rm -f "$NMDIR/guard.ts"
+check "a boot the guard did not arm never parks on it" "$(soft 9)" "running"
+fresh; boot foreground
+check "an unreadable start count parks nothing" "$(soft "")$(soft x)" "runningrunning"
+fresh; boot foreground; : > "$NMDIR/incident.log"; touch "$NMDIR/disabled"
+soft 9 >/dev/null
+check "a Suite parked before keeps its incident" "$([ -s "$NMDIR/incident.log" ] && echo rewritten || echo kept)" "kept"
+fresh; boot foreground; NM_SOFT_LOOP_MAX=6
+check "the threshold is a knob" "$(soft 5)$(soft 6)" "runningparked"
+unset NM_SOFT_LOOP_MAX
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
