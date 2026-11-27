@@ -590,22 +590,38 @@
     }
     card.classList.remove("u-hide");
     $("incidentout").textContent = txt;
-    // Not every incident is a guard trip: a missing engine binary writes one too.
+    // Not every incident is a guard trip: a missing engine binary writes one, and so does a
+    // boot the manager ran no mount pass for, which service.sh writes as current state.
     const binary = /reason=engine did not run|engine binary/i.test(txt);
-    $("incchip").textContent = binary ? "engine binary missing" : "bootloop guard";
+    const noEntry = /^reason=no boot entry point/m.test(txt);
+    const loop = /^reason=system_server restarted/m.test(txt);
+    $("incchip").textContent = binary ? "engine binary missing"
+      : noEntry ? "mount pass never ran" : loop ? "crash loop" : "bootloop guard";
     $("incnote").textContent = binary
       ? "Saved when a boot found no runnable engine binary. Not live state."
+      : noEntry ? "Written by a boot whose manager never ran the mount pass, so nothing was injected."
+      : loop ? "Saved when system_server kept restarting before boot completed. Not live state."
       : "Saved when the bootloop guard fired. Not live state.";
     const el = $("incwarn");
     if (el) {
       const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
       const off = ((dr && dr.stdout) || "").trim() === "1";
+      let now = false;
+      if (noEntry && !off) {
+        const nr = await exec('b=$(/system/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null); ' +
+          '[ -n "$b" ] && [ "$(/system/bin/cat /data/adb/nomount/mountpass.ts 2>/dev/null)" != "$b" ] ' +
+          "&& echo 1 || echo 0");
+        now = ((nr && nr.stdout) || "").trim() === "1";
+      }
       const btn = '<button class="act u-btn-mid" data-act="openDetail">'
         + 'See what happened</button>';
       el.hidden = false;
       el.innerHTML = off
         ? "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite. " +
           "<b>Nothing is being injected</b> until you re-arm it. " + btn
+        : now
+        ? "\u26d4 The mount pass never ran this boot, so <b>nothing is being injected</b>. On " +
+          "KernelSU that means the manager has no metamodule support: update it. " + btn
         : "\u26a0\ufe0f An earlier boot recorded an incident. The Suite is running now \u2014 " +
           "this is a saved record, not current state. " + btn;
     }

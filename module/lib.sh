@@ -464,6 +464,21 @@ nm_guard_armed() {
     [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gab" ]
 }
 
+# Never over a record of the guard firing: that one names what crashed, and this says only
+# that the manager ran no boot entry point.
+nm_incident_no_entry() {
+    grep -qE '^(bootcount=|reason=system_server)' "$NMDIR/incident.log" 2>/dev/null && return 0
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "reason=no boot entry point ran: $NMDIR/mountpass.ts is absent or stale"
+        echo "ksu_env_seen_by_post_fs_data=see boot.log [post-fs-data] lines"
+        echo "manager=$(ksud -V 2>/dev/null | head -1)"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "note=NoMount is a metamodule. It needs a KernelSU/SukiSU/APatch build that supports metamodules, or Magisk. Update the manager."
+    } > "$NMDIR/incident.log" 2>/dev/null
+}
+
 nm_incident_missing_binary() {
     nmlog "⛔ engine binary is missing or not executable ($BIN) - nothing was injected this boot"
     {

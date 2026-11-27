@@ -58,17 +58,9 @@ unset _soft
 sleep 10
 
 if [ "$_hookran" = 0 ]; then
-    nmlog "⛔ the mount pass never ran this boot - nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
-    {
-        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
-        echo "reason=no boot entry point ran: $NMDIR/mountpass.ts is absent or stale"
-        echo "ksu_env_seen_by_post_fs_data=see boot.log [post-fs-data] lines"
-        echo "manager=$(ksud -V 2>/dev/null | head -1)"
-        echo "kernel=$(uname -r)"
-        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-        echo "note=NoMount is a metamodule. It needs a KernelSU/SukiSU/APatch build that supports metamodules, or Magisk. Update the manager."
-    } > "$NMDIR/incident.log" 2>/dev/null
+    nmlog "⛔ the mount pass never ran this boot - nothing was injected, and the post-boot reload, absorb and whiteouts are skipped too: serving after zygote has preloaded the stock files is itself something an app can see. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
 fi
+[ "$_hookran" = 0 ] && nm_incident_no_entry
 
 if [ ! -e "$NMDIR/disabled" ]; then
     nm_fix_shell_tmp
@@ -137,7 +129,7 @@ if [ "$_armed" = 0 ] && [ ! -e "$NMDIR/disabled" ]; then
     nmlog "⛔ the bootloop guard did not arm this boot - the post-boot reload, absorb, whiteouts, hide list and ghost sync are skipped too, so nothing is injected without a counter to stop a panic loop"
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && [ "$_hookran" = 1 ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
     _rl=$(_rl_summary "$_rl_all")
@@ -150,7 +142,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     fi
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && [ "$_hookran" = 1 ]; then
     _ab_all=$(nmto 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
     nmlog_absorb_notes "$_ab_all"
@@ -206,7 +198,7 @@ if [ "$booted" != "1" ]; then
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
-if [ "$_armed" = 1 ]; then
+if [ "$_armed" = 1 ] && [ "$_hookran" = 1 ]; then
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts.txt"; then
     _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
     _wo_rc=$?

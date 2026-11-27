@@ -73,6 +73,19 @@ check "a Suite parked before keeps its incident" "$([ -s "$NMDIR/incident.log" ]
 fresh; boot foreground; NM_SOFT_LOOP_MAX=6
 check "the threshold is a knob" "$(soft 5)$(soft 6)" "runningparked"
 unset NM_SOFT_LOOP_MAX
+
+echo
+echo "a boot with no mount pass does not bury a guard record"
+fresh; boot foreground; boot foreground; boot foreground
+nm_incident_no_entry
+check "a guard trip's incident survives" "$(grep -c '^bootcount=3' "$NMDIR/incident.log")" "1"
+fresh; boot foreground; soft 4 >/dev/null
+nm_incident_no_entry
+check "  and so does a crash loop's" "$(grep -c '^reason=system_server' "$NMDIR/incident.log")" "1"
+fresh; nm_incident_no_entry
+check "with no record, it writes its own" "$(grep -c '^reason=no boot entry point' "$NMDIR/incident.log")" "1"
+echo "reason=engine did not run: x" > "$NMDIR/incident.log"; nm_incident_no_entry
+check "  and replaces one that is not a guard record" "$(grep -c '^reason=no boot entry point' "$NMDIR/incident.log")" "1"
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
