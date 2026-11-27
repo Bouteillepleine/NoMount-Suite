@@ -10,6 +10,15 @@
 > `[WebUI]`, and a release header names the engine build its engine lines need. The
 > WebUI header shows the build you have, e.g. `engine v36 · 1.36.3`.
 
+## v1.3.219 — engine v36 · 1.36.7 (the [LKM] lines need the 01_ zip; built-in kernels need no rebuild)
+
+- [LKM] The 6.12 module loads again on GKI kernels: v1.3.218's carried symbol versions no 6.12 kernel accepts.
+- [LKM] No 6.18 module ships until one is built against its KMI; a 6.18 kernel needs NoMount built in.
+- [LKM] After a kernel update within the same KMI, the module loads instead of staying down until a reinstall.
+- [LKM] Directories it adds to an overlay partition are numbered next to their stock siblings, as the built-in engine does.
+- [Suite] The card no longer says "not fully measured" when nothing on the ghost list is the cloak's own.
+- [Suite] Two quick reboots in a row no longer park the Suite.
+
 ## v1.3.218 — engine v36 · 1.36.6 ([engine] lines need a rebuilt kernel; the LKM zip carries them)
 
 - [engine] Replaced files answer FIONREAD with the size the caller reads, and a hidden app's lookup no longer shows them as "(deleted)" in other apps' maps.
