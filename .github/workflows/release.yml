@@ -386,6 +386,19 @@ jobs:
             fi
           done
 
+          # A v* tag pushed by hand on another branch publishes, but must not move what every
+          # device reading main's update.json is offered to a build main does not contain.
+          on_main=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq '.status')
+          case "$on_main" in
+            identical|behind) ;;
+            ahead|diverged)
+              echo "::warning::$TAG ($GITHUB_SHA) is not on main - update.json left where it is"
+              exit 0 ;;
+            *)
+              echo "::error::could not tell whether $GITHUB_SHA is on main (compare said '$on_main')"
+              exit 1 ;;
+          esac
+
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/mainwt
           live=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /tmp/mainwt/update.json 2>/dev/null | head -1 || true)
