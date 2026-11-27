@@ -25,6 +25,18 @@
 # accounting arm it does not have, so the subject's vmsize and statm read the
 # same as the control here and the script says so rather than failing.
 #
+# Measured on CPH2747, 6.12.69-android16-6-4k, IN-TREE, 64-page subject under the
+# shipped /data/adb/ rule, with the -c section below:
+#
+#              control    subject
+#   smaps      1          0
+#   rollup     256        0            <- kB of Rss the mapping added
+#   pmquery    1          0            <- PROCMAP_QUERY, 6.12+
+#   pmscan     1          0            <- PAGEMAP_SCAN regions, 6.7+
+#   numa       -1         -1           <- no /proc/self/numa_maps on this kernel
+#   vmsize     8669632    8669376      <- 256 kB, the accounting arm working
+#   statm      2167408    2167344      <- 64 pages
+#
 # No nm client is needed: the rules are programmed by the Suite's own service
 # at boot, and the module reports on load whether the knob exists at all.
 #
@@ -175,9 +187,63 @@ else
 	echo "KNOWN accounting: this build has no accounting arm, so VmSize and statm"
 	echo "      still count the hidden mapping - control vmsize=$cv statm=$cs,"
 	echo "      subject vmsize=$sv statm=$ss"
-	echo "KNOWN smaps_rollup totals and PROCMAP_QUERY still include it, and"
-	echo "      map_files still lists the address range even when the path is gone."
+	echo "KNOWN map_files still lists the address range even when the path is gone."
 fi
+
+# The surfaces apply_nomount_stack.sh asserts in SOURCE and this gate did not read.
+#
+# verify_pathhide() names eleven containing functions; the two probe invocations above
+# reach six of them. smaps_rollup and PROCMAP_QUERY used to be two echoed KNOWN lines
+# right here - prose, which cannot fail - and show_smap() and show_numa_map() were not
+# mentioned at all. infn() greps for a needle inside a function, so it cannot tell a
+# guard with inverted polarity, or one placed after the leak, from a working one.
+#
+# One extra invocation in -c mode, because these need a control taken in the SAME
+# process. rollup especially: it is an aggregate with no path in it, so the only
+# question it can answer is "did Rss move by about the size of the mapping", and
+# whichever mapping runs first in a process pays one-time first-touch costs that
+# swallow a 16 kB answer. -c mode runs a discarded warm-up pass first.
+echo "-- surfaces the source gate asserts and this gate did not measure --"
+both=$("$PROBE" -c "$CTL" "$SUBJ" ph-subject.bin)
+vrow() { echo "$1" | sed -n "s/^v:$2  *\([A-Za-z]*\).*/\1/p"; }
+echo "$both" | sed -n '/^v:/p'
+
+for row in smaps:show_smap rollup:show_smaps_rollup pmquery:query_matching_vma pmscan:pagemap_scan_test_walk numa:show_numa_map
+do
+	name=${row%%:*}
+	fn=${row#*:}
+	case "$(vrow "$both" "$name")" in
+	CLEAN)
+		echo "ok   $name: $fn() withheld it, and the control proves the surface is readable" ;;
+	TELL)
+		if [ "$VARIANT" = in-tree ]; then
+			echo "FAIL $name: $fn() still renders the subject while maps denies it"
+			fail=1
+		else
+			echo "KNOWN $name: no $fn() arm on this LKM build - the subject is still"
+			echo "      visible through it. Measured, not assumed."
+		fi ;;
+	INSTRUMENT)
+		echo "FAIL $name: the CONTROL is invisible to this surface too, so the"
+		echo "     subject's result means nothing - the probe is wrong, not the cloak"
+		fail=1 ;;
+	SKIP)
+		echo "KNOWN $name: not measurable on this kernel (no /proc/self/numa_maps, or"
+		echo "      an ioctl this version predates). $fn() stays unexercised - which is"
+		echo "      not the same as clean." ;;
+	*)
+		echo "FAIL $name: no v:$name row - probe too old for this gate"; fail=1 ;;
+	esac
+done
+
+# Reported, never failed. VmSize is deducted and RSS is not, so a hidden mapping that
+# dominates total_vm would order them impossibly - but it needs
+# total_vm - hidden_vm < rss, and on CPH2747 total_vm is ~8.3 GB before the subject is
+# mapped, so no file size reaches it. The probe says UNREACHABLE rather than CLEAN so
+# this cannot be read as a pass.
+echo "-- VmRSS vs VmSize invariant --"
+echo "     $(echo "$both" | sed -n '/^v:rssinv/p')"
+
 
 # Case-SENSITIVE and anchored. The kernel prints these in capitals, and `-i` also matched
 # OPlus's own `osi_debug:` lines, which contain "debug:" -- so on an OPlus device this
