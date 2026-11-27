@@ -1168,9 +1168,9 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         };
         format!(
             "note: {left_out}{out} {why}, so the hide list was kept out of it: rules.txt UID, \
-             scope and excluded-app suffixes, the check report's hide-list names, any package name left in blocklist \
-             and any /data/app path in the fingerprint, the rule list, the check report and \
-             mountinfo were redacted in place. Pass a private path for the unredacted \
+             scope and excluded-app suffixes, the check report's hide-list names, any package name left in blocklist, \
+             any /data/app path in the fingerprint, the rule list, the check report and \
+             mountinfo, and the crashed app named in incident.log were redacted in place. Pass a private path for the unredacted \
              bundle: nomount export /data/adb/nomount/report"
         )
     });
@@ -1239,8 +1239,37 @@ fn redact_for_shared(name: &str, body: &str) -> String {
         "blocklist" => {
             rejoin(body.lines().filter(keep_installed).map(str::to_string).collect())
         }
+        "incident.log" => redact_tombstone_names(&redact_app_paths_doc(body)),
         _ => redact_app_paths_doc(body),
     }
+}
+
+/// A tombstone line names the crashed process, which can be an app on the hide list. The
+/// same substitution as the WebUI's redactIncident (30-checks.js): a dotted name after
+/// `>>> ` or `name: `, followed by `:` or a space, unless it is the platform's own.
+fn redact_tombstone_names(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some((i, len)) =
+        [">>> ", "name: "].iter().filter_map(|m| rest.find(m).map(|i| (i, m.len()))).min()
+    {
+        let (head, tail) = rest.split_at(i + len);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(tail.len());
+        let name = &tail[..end];
+        let dotted = name.contains('.') && name.split('.').all(|l| !l.is_empty());
+        let platform = name.starts_with("com.android.") || name.starts_with("android.");
+        if dotted && !platform && tail[end..].starts_with([':', ' ']) {
+            out.push_str("<app>");
+        } else {
+            out.push_str(name);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn redact_app_paths_doc(body: &str) -> String {
@@ -1853,6 +1882,14 @@ rules=3
         let inc = "tombstone=/data/tombstones/tombstone_00\n  Abort message: \
                    could not open /data/app/~~aB1/com.mybank.app-x9/base.apk\n";
         assert!(!redact_for_shared("incident.log", inc).contains("com.mybank.app"));
+
+        let inc = "tombstone=/data/tombstones/tombstone_01\n  \
+                   pid: 4121, tid: 4121, name: com.detector.app  >>> com.detector.app:remote <<<\n";
+        let got = redact_for_shared("incident.log", inc);
+        assert!(!got.contains("com.detector.app"), "the crashed app must not survive: {got}");
+        assert!(got.contains("name: <app>  >>> <app>:remote <<<"), "{got}");
+        let sys = "  pid: 1, tid: 1, name: com.android.phone  >>> com.android.phone <<<\n";
+        assert_eq!(redact_for_shared("incident.log", sys), sys, "the platform's own stays readable");
     }
 
     #[test]
