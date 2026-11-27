@@ -654,6 +654,9 @@ jobs:
       - name: Install qemu and the arm64 toolchain
         run: |
           set -eu
+          # Nothing here comes from the runner image's Microsoft repository, and a 403 from it
+          # failed apt-get update for the whole job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             qemu-system-arm erofs-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
