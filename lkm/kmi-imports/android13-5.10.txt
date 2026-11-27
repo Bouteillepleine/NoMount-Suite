@@ -6,10 +6,12 @@ call_rcu
 clear_inode
 copy_from_kernel_nofault
 d_drop
+d_find_alias
 d_lookup
 d_splice_alias
 dentry_open
 dentry_path_raw
+dget_parent
 down_read_killable
 free_inode_nonrcu
 generic_file_llseek_size

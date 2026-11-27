@@ -7,6 +7,7 @@ d_drop
 d_lookup
 dentry_open
 dentry_path_raw
+dget_parent
 free_inode_nonrcu
 generic_file_llseek_size
 generic_file_readonly_mmap
@@ -34,3 +35,4 @@ vfs_getattr_nosec
 vfs_getxattr
 vfs_setpos
 vfs_setxattr
+vma_set_file

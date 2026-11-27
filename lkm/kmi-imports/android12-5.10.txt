@@ -5,10 +5,12 @@ __netlink_dump_start
 __put_cred
 clear_inode
 d_drop
+d_find_alias
 d_lookup
 d_splice_alias
 dentry_open
 dentry_path_raw
+dget_parent
 free_inode_nonrcu
 generic_file_llseek_size
 generic_file_readonly_mmap
