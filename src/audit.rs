@@ -371,11 +371,13 @@ fn check_zero_mount() -> Check {
     };
     let rows = crate::absorb::parse_mountinfo_bytes(&mi);
     let roots = crate::absorb::fs_roots(&rows);
-    let hits: Vec<(&crate::absorb::MountRow, std::path::PathBuf)> = rows
+    let mut hits: Vec<(&crate::absorb::MountRow, std::path::PathBuf)> = rows
         .iter()
         .filter_map(|r| crate::absorb::source_of(r, &roots).map(|src| (r, src)))
         .filter(|(_, src)| src.starts_with("/data/adb"))
         .collect();
+    // Keyed by the layer that is not ROM content: an overlay has no source the test above sees.
+    hits.extend(crate::absorb::foreign_overlays(&rows));
     let (by_design, leaked): (Vec<_>, Vec<_>) = hits.iter().partition(|(_, src)| {
         crate::absorb::module_dir_of(src).is_some_and(|d| crate::absorb::is_hook_framework(&d))
     });
@@ -433,7 +435,7 @@ fn check_zero_mount() -> Check {
     {
         let owners = owners_of(&leaked);
         let owner = if owners.is_empty() {
-            "a bind from outside /data/adb/modules".to_string()
+            "a mount from outside /data/adb/modules".to_string()
         } else {
             owners.join(", ")
         };

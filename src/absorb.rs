@@ -1603,24 +1603,89 @@ pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
         let subtree_bind = r.root != "/";
         let off_userdata = data_dev.as_deref() == Some(r.dev.as_str());
         let loop_image = is_loop_dev(&r.dev);
-        if subtree_bind || off_userdata || loop_image || overlay_layers_on_data(r) {
+        if subtree_bind
+            || off_userdata
+            || loop_image
+            || overlay_foreign_layer(r, rows, data_dev.as_deref()).is_some()
+        {
             hits.push((format!("{} (root={}, dev={})", t, r.root, r.dev), loop_image));
         }
     }
     hits
 }
 
-/// An overlay whose layers live on /data is a module's, not the ROM's: OxygenOS's own
-/// /product overlays stack ROM partitions only. Its root is "/", so the root and device
-/// tests above never see it.
-fn overlay_layers_on_data(r: &MountRow) -> bool {
-    r.fstype == "overlay"
-        && r.superopts.split(',').any(|o| {
-            ["lowerdir=", "lowerdir+=", "upperdir=", "workdir="]
+/// Overlays laid over a ROM path with a layer that is not ROM content, each with that layer.
+/// Their root is "/", so the source-based mount counts never see them.
+pub(crate) fn foreign_overlays(rows: &[MountRow]) -> Vec<(&MountRow, PathBuf)> {
+    let data_dev = rows.iter().find(|r| r.target == Path::new("/data")).map(|r| r.dev.as_str());
+    rows.iter()
+        .filter(|r| ROM_ROOTS.iter().any(|root| r.target.to_string_lossy().starts_with(root)))
+        .filter_map(|r| overlay_foreign_layer(r, rows, data_dev).map(|l| (r, PathBuf::from(l))))
+        .collect()
+}
+
+/// The first layer of an overlay that is not ROM content. OxygenOS's own /product overlays
+/// stack my_* and /product only; a module that stages its tree on /data, a tmpfs, a ramdisk
+/// or a loop image and lays an overlay over the ROM has a layer that is neither.
+fn overlay_foreign_layer(r: &MountRow, rows: &[MountRow], data_dev: Option<&str>) -> Option<String> {
+    if r.fstype != "overlay" {
+        return None;
+    }
+    r.superopts
+        .split(',')
+        .filter_map(|o| {
+            ["lowerdir=", "lowerdir+=", "datadir+=", "upperdir=", "workdir="]
                 .iter()
-                .filter_map(|k| o.strip_prefix(k))
-                .any(|v| v.split(':').any(|d| d.starts_with("/data/")))
+                .find_map(|k| o.strip_prefix(k))
         })
+        .flat_map(overlay_layer_paths)
+        .find(|d| !layer_is_rom(d, rows, data_dev))
+}
+
+/// One option's layers. A colon inside a layer is escaped: as `\072`, or as the `\:` it was
+/// mounted with, which reads `\134:` here.
+fn overlay_layer_paths(v: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for part in v.split(':') {
+        if let Some(esc) = cur.strip_suffix("\\134") {
+            cur = format!("{esc}:{part}");
+            continue;
+        }
+        if !cur.is_empty() {
+            out.push(unescape(&cur));
+        }
+        cur = part.to_string();
+    }
+    if !cur.is_empty() {
+        out.push(unescape(&cur));
+    }
+    out
+}
+
+/// A layer on a ROM path, or on a read-only block partition mounted elsewhere (an OEM
+/// partition such as /mi_ext). Not /data, and not a tmpfs, ramdisk or loop image: those are
+/// what a module stages a tree on.
+fn layer_is_rom(d: &str, rows: &[MountRow], data_dev: Option<&str>) -> bool {
+    if d == "/data" || d.starts_with("/data/") {
+        return false;
+    }
+    if on_rom_path(d) {
+        return true;
+    }
+    let p = Path::new(d);
+    // The deepest mount holding it; max_by_key takes the last of equals, the one on top.
+    let Some(m) = rows
+        .iter()
+        .filter(|r| p.starts_with(&r.target))
+        .max_by_key(|r| r.target.as_os_str().len())
+    else {
+        return false;
+    };
+    m.dev.split(':').next().is_some_and(|major| major != "0")
+        && !is_loop_dev(&m.dev)
+        && data_dev != Some(m.dev.as_str())
+        && m.superopts.split(',').next() == Some("ro")
 }
 
 pub(crate) fn foreign_rom_mounts(rows: &[MountRow]) -> Vec<String> {
@@ -2602,6 +2667,57 @@ mod tests {
         let hits = super::foreign_rom_mounts(&rows);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].starts_with("/system/etc "), "{hits:?}");
+    }
+
+    /// The same overlay staged off /data: a tmpfs under /mnt, a ramdisk, a loop image.
+    /// None of their layers starts with /data/, and each read as stock.
+    #[test]
+    fn an_overlay_staged_on_scratch_space_is_foreign_and_an_oem_partition_layer_is_not() {
+        let mi = "58 1 254:24 / / ro,relatime - erofs /dev/block/dm-24 ro,seclabel\n\
+                  20 58 254:86 / /data rw,nosuid - f2fs /dev/block/dm-86 rw,seclabel\n\
+                  64 58 0:23 / /mnt rw,nosuid - tmpfs tmpfs rw,seclabel\n\
+                  65 64 8:2 / /mnt/vendor/persist rw,nosuid - ext4 /dev/block/sda2 rw,seclabel\n\
+                  70 58 254:40 / /mi_ext ro,relatime - erofs /dev/block/dm-40 ro,seclabel\n\
+                  80 58 0:60 / /debug_ramdisk rw,relatime - tmpfs magisk rw,seclabel\n\
+                  90 64 7:200 / /mnt/img rw,relatime - ext4 /dev/block/loop30 rw,seclabel\n\
+                  45 58 0:27 / /product/overlay ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/my_product/overlay:/product/overlay\n\
+                  46 58 0:28 / /product/app ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/mi_ext/product/app:/product/app\n\
+                  901 58 0:124 / /system/etc ro,relatime - overlay KSU \
+                  ro,seclabel,lowerdir=/mnt/vendor/mountify/system/etc:/system/etc\n\
+                  902 58 0:125 / /product/lib ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/debug_ramdisk/mm/product/lib:/product/lib\n\
+                  903 58 0:126 / /vendor/etc ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/mnt/img/vendor/etc:/vendor/etc\n\
+                  904 58 0:127 / /odm/etc ro,relatime - overlay overlay \
+                  ro,seclabel,lowerdir=/odm/etc,upperdir=/mnt/vendor/persist/u,workdir=/mnt/vendor/persist/w\n";
+        let rows = super::parse_mountinfo(mi);
+        let hits = super::foreign_rom_mounts(&rows);
+        let targets: Vec<&str> = hits.iter().filter_map(|h| h.split(' ').next()).collect();
+        assert_eq!(targets, ["/system/etc", "/product/lib", "/vendor/etc", "/odm/etc"], "{hits:?}");
+
+        let layers: Vec<String> = super::foreign_overlays(&rows)
+            .into_iter()
+            .map(|(_, l)| l.display().to_string())
+            .collect();
+        assert_eq!(
+            layers,
+            [
+                "/mnt/vendor/mountify/system/etc",
+                "/debug_ramdisk/mm/product/lib",
+                "/mnt/img/vendor/etc",
+                "/mnt/vendor/persist/u"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_escaped_colon_stays_inside_its_overlay_layer() {
+        assert_eq!(super::overlay_layer_paths("/a:/b"), ["/a", "/b"]);
+        assert_eq!(super::overlay_layer_paths("/a\\072x:/b"), ["/a:x", "/b"]);
+        assert_eq!(super::overlay_layer_paths("/a\\134:x:/b"), ["/a:x", "/b"]);
+        assert_eq!(super::overlay_layer_paths("/a\\040b"), ["/a b"]);
     }
 
     #[test]

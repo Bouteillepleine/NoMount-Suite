@@ -357,11 +357,10 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     let ours: std::collections::HashSet<(std::path::PathBuf, std::path::PathBuf)> =
         tracked.into_iter().collect();
     let (mut total, mut by_design) = (0usize, 0usize);
-    for r in &rows {
-        let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
-        if !src.starts_with("/data/adb") {
-            continue;
-        }
+    let sourced = rows.iter().filter_map(|r| {
+        crate::absorb::source_of(r, &roots).filter(|s| s.starts_with("/data/adb")).map(|s| (r, s))
+    });
+    for (r, src) in sourced.chain(crate::absorb::foreign_overlays(&rows)) {
         total += 1;
         if ours.contains(&(r.target.clone(), src.clone()))
             || crate::absorb::module_dir_of(&src)
