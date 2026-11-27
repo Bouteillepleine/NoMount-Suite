@@ -10,8 +10,16 @@
 > `[WebUI]`, and a release header names the engine build its engine lines need. The
 > WebUI header shows the build you have, e.g. `engine v36 · 1.36.3`.
 
-## v1.3.219 — engine v36 · 1.36.7 (the [LKM] lines need the 01_ zip; built-in kernels need no rebuild)
+## v1.3.219 — engine v36 · 1.36.8 ([engine] lines need a rebuilt kernel; the 01_ zip carries them, except where a line says built-in)
 
+- [engine] Directories it adds entries to on an overlay partition end their listing where stock ones do, and a seek to the end of a directory it took over agrees with stat.
+- [engine] Replaced files answer non-blocking, direct and uncached reads the way the stock file does.
+- [engine] An fd a served process opened and a hidden app uses (zygote's kept fds, a provider's) reads, seeks and maps the stock file its stat describes.
+- [engine] A byte-range lock from the end of a file and FIOQSIZE measure from the size stat reports (built-in; the LKM covers the directories it adds).
+- [engine] Files it adds to an overlay partition show a file handle in inotify fdinfo like their siblings, and on ext4/f2fs they carry a generation.
+- [engine] A hidden app's chmod or truncate on a replaced file changes the stock file, not the module's copy.
+- [engine] It no longer adds files where non-root callers create entries, and tmpfs is no longer a target.
+- [engine] A listing no longer fails with ENOMEM while many files are being added to its directory.
 - [LKM] The 6.12 module loads again on GKI kernels: v1.3.218's carried symbol versions no 6.12 kernel accepts.
 - [LKM] No 6.18 module ships until one is built against its KMI; a 6.18 kernel needs NoMount built in.
 - [LKM] After a kernel update within the same KMI, the module loads instead of staying down until a reinstall.
@@ -19,6 +27,12 @@
 - [LKM] A module that does not load leaves every candidate tried and the kernel's reason in boot.log, and loading the copy kept from before an update is logged as a warning naming both builds.
 - [Suite] The card no longer says "not fully measured" when nothing on the ghost list is the cloak's own.
 - [Suite] Two quick reboots in a row no longer park the Suite.
+- [Suite] system_server restarting four times before boot completes parks the Suite, like a failed boot.
+- [Suite] A boot whose mount pass never ran skips the late passes instead of serving part of a plan.
+- [Suite] The mount checks count overlays built from read-only OEM partitions.
+- [Suite] Exports never follow or overwrite links, and shared incident logs leave hidden apps' names out.
+- [WebUI] The header tells "engine offline" from "unreachable from this page", and a declined check request falls back at once.
+- [WebUI] The guard shows "not armed this boot" and crash-loop parks; the last incident stays readable after a reboot.
 
 ## v1.3.218 — engine v36 · 1.36.6 ([engine] lines need a rebuilt kernel; the LKM zip carries them except FIONREAD)
 
