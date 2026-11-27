@@ -376,7 +376,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
             # probe machinery itself did not answer, not that there was nothing to sample.
             # Treating it as settled is why every boot logged "settle tries=0".
             unchecked:probe-unavailable) ;;
-            ok|unchecked*|"") break ;;
+            ok|ok:*|unchecked*|"") break ;;
         esac
         _try=$((_try + 1))
         [ "$_try" -lt 6 ] || break
@@ -442,7 +442,7 @@ elif [ -x "$BIN" ]; then
     [ "$_hfresh" = 1 ] && _hv=$(_health_get verdict)
     _cons=$(_health_get consistency)
     case "$_cons" in
-        ok|unchecked*|"") _consbad=0 ;;
+        ok|ok:*|unchecked*|"") _consbad=0 ;;
         *) _consbad=1 ;;
     esac
     if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then

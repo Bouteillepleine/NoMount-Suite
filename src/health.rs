@@ -66,6 +66,12 @@ impl Fingerprint {
                      as root does, which is what stops an app spotting the injection by diffing \
                      its own view.",
                 ),
+            "ok:size-only" => mk("per-UID consistency canary", Verdict::Pass, self.consistency.clone())
+                .meaning(
+                    "A normal app sees the same size at every sampled injected path as root \
+                     does. None of those files could be read by both, by their own modes or for \
+                     want of a root baseline, so their bytes were not compared.",
+                ),
             "unchecked:probe-uid-hidden" => mk(
                 "per-UID consistency canary",
                 Verdict::NotApplicable,
@@ -306,6 +312,9 @@ const PR_NOREAD: u32 = 5;
 /// The app could stat it and its mode lets the app read it, root read the same bytes, and
 /// open() still failed: an app-visible break (the engine's backing open refused), not stock.
 const PR_NOOPEN: u32 = 6;
+/// Same size, and the bytes could not be compared: root had no baseline, or the file's own
+/// mode keeps the app out, as stock's would. Agreement, but on size alone.
+const PR_SIZE: u32 = 7;
 
 /// Bytes of each sampled file folded on both sides. One page: enough to separate two files
 /// of equal length in every case this has to catch, cheap enough to do inside the probe
@@ -494,7 +503,7 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
             }
             // Same length. Now the bytes, if root established a baseline for them. No
             // allocation here: one stack page and read(2) until it is full or the file ends.
-            out[i] = PR_AGREE;
+            out[i] = PR_SIZE;
             let Some(want) = root_sums[i] else { continue };
             let fd = unsafe { libc::open(cpaths[i].as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             if fd < 0 {
@@ -509,6 +518,7 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
                 }
                 continue;
             }
+            out[i] = PR_AGREE;
             let mut buf = [0u8; PR_PREFIX];
             let mut got = 0usize;
             let mut read_err = false;
@@ -542,17 +552,27 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
         Err(_) => return "unchecked:probe-unavailable".to_string(),
     };
 
-    if answers[0] != PR_AGREE {
+    canary_verdict(&kept, &answers, probe_uid)
+}
+
+fn canary_verdict(kept: &[&str], answers: &[u32], probe_uid: u32) -> String {
+    // /system/build.prop is 0600, so the canary slot itself agrees on size alone.
+    if !matches!(answers.first(), Some(&PR_AGREE) | Some(&PR_SIZE)) {
         // The app could not read a file with no rule on it, so nothing below means
         // anything -- do not report a mismatch the injection did not cause.
         return "unchecked:probe-unavailable".to_string();
     }
 
     let mut checked = 0;
+    let mut size_only = 0;
     let mut unread: Option<String> = None;
     for (i, target) in kept.iter().enumerate().skip(1) {
-        match answers[i] {
+        match answers.get(i).copied().unwrap_or(PR_UNUSED) {
             PR_AGREE => checked += 1,
+            PR_SIZE => {
+                checked += 1;
+                size_only += 1;
+            }
             PR_DIFFER => return format!("mismatch:{target}(size differs for uid {probe_uid})"),
             PR_BYTES => {
                 return format!("mismatch:{target}(same size, different bytes for uid {probe_uid})")
@@ -571,6 +591,8 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
     }
     if checked == 0 {
         "unchecked".to_string()
+    } else if checked == size_only {
+        "ok:size-only".to_string()
     } else {
         "ok".to_string()
     }
@@ -1938,6 +1960,24 @@ rules=3
         let mut bad = fp("v30", 12);
         bad.consistency = "mismatch:/system/etc/x(root=12 app=ENOENT)".into();
         assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
+    }
+
+    #[test]
+    fn a_canary_that_compared_sizes_only_says_so() {
+        let kept = ["/system/build.prop", "/system/etc/a", "/system/etc/b"];
+        assert_eq!(canary_verdict(&kept, &[PR_SIZE, PR_SIZE, PR_SIZE], 10150), "ok:size-only");
+        assert_eq!(canary_verdict(&kept, &[PR_SIZE, PR_SIZE, PR_AGREE], 10150), "ok");
+        assert_eq!(canary_verdict(&kept, &[PR_AGREE, PR_AGREE, PR_AGREE], 10150), "ok");
+        assert_eq!(
+            canary_verdict(&kept, &[PR_NOSTAT, PR_AGREE, PR_AGREE], 1),
+            "unchecked:probe-unavailable"
+        );
+        assert!(canary_verdict(&kept, &[PR_SIZE, PR_SIZE, PR_BYTES], 1).starts_with("mismatch:"));
+        let mut f = fp("v36", 3);
+        f.consistency = "ok:size-only".into();
+        assert_eq!(verdict_of(&f, "per-UID consistency canary"), "PASS");
+        let row = f.checks().into_iter().find(|c| c.name == "per-UID consistency canary").unwrap();
+        assert!(row.meaning.contains("not compared"), "{}", row.meaning);
     }
 
     #[test]
