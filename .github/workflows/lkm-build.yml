@@ -82,6 +82,7 @@ jobs:
         if: steps.sel.outputs.run == '1'
         run: |
           set -e
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list  # its 403 failed apt-get update
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev build-essential rsync \
