@@ -376,18 +376,16 @@ fn namespace_probes() -> Vec<(String, String)> {
     out
 }
 
-/// `None` when our own mount namespace could not be read, so no other namespace could be
-/// compared against it. That is not the same as "no foreign mounts", and a caller that cannot
-/// tell them apart reports a clean posture it never established.
-pub fn survey_elsewhere_checked() -> Option<Vec<Elsewhere>> {
-    mnt_ns_of("self")?;
-    Some(survey_elsewhere())
-}
-
-pub fn survey_elsewhere() -> Vec<Elsewhere> {
-    let Some(mine) = mnt_ns_of("self") else { return Vec::new() };
-    let ours: HashSet<(PathBuf, PathBuf)> = survey()
-        .unwrap_or_default()
+/// An Err when our own mount namespace, or our own survey, could not be read, so no other
+/// namespace could be compared against it. That is not the same as "no foreign mounts", and
+/// a caller that cannot tell them apart reports a clean posture it never established.
+pub fn survey_elsewhere() -> Result<Vec<Elsewhere>> {
+    let mine = mnt_ns_of("self").context(
+        "our own mount namespace could not be read, so no other process's mount table could be \
+         compared against it",
+    )?;
+    let live = engine_rules_for_survey()?;
+    let ours: HashSet<(PathBuf, PathBuf)> = survey_with(MOUNTINFO, &live)?
         .into_iter()
         .map(|s| (s.target, s.source))
         .collect();
@@ -399,7 +397,7 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
         if !seen_ns.insert(ns) {
             continue;
         }
-        for m in survey_of(&format!("/proc/{pid}/mountinfo")).unwrap_or_default() {
+        for m in survey_with(&format!("/proc/{pid}/mountinfo"), &live).unwrap_or_default() {
             if !ours.contains(&(m.target.clone(), m.source.clone())) {
                 out.push(Elsewhere {
                     seen_in: format!("{name} (pid {pid})"),
@@ -409,7 +407,7 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[derive(Default)]
@@ -538,11 +536,24 @@ pub fn survey() -> Result<Vec<Surveyed>> {
 }
 
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
-    let rows = read_mountinfo(mountinfo).context("read mountinfo")?;
+    survey_with(mountinfo, &engine_rules_for_survey()?)
+}
+
+/// A failed list is not "no live rules": every bind would read as not yet served, and absorb
+/// would pop and re-add content that is already live.
+fn engine_rules_for_survey() -> Result<String> {
+    Nm::new().list_retry().context(
+        "the engine would not list its rules, so which module mounts it already serves could \
+         not be told",
+    )
+}
+
+fn survey_with(mountinfo: &str, live: &str) -> Result<Vec<Surveyed>> {
+    let rows = read_mountinfo(mountinfo).with_context(|| format!("cannot read {mountinfo}"))?;
     let roots = fs_roots(&rows);
     let (skips, skip_src, _) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
-    let red = Redundancy::new(&Nm::new().list_retry().unwrap_or_default(), &rows);
+    let red = Redundancy::new(live, &rows);
 
     let mut out: Vec<Surveyed> = rows
         .iter()
@@ -2220,7 +2231,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let mut elsewhere_dropped = 0u32;
-    for e in survey_elsewhere() {
+    let elsewhere = survey_elsewhere().unwrap_or_else(|e| {
+        eprintln!("nomount: absorb: other mount namespaces were not surveyed: {e:#}");
+        Vec::new()
+    });
+    for e in elsewhere {
         // Zygote's namespace is the one every app inherits, so a bind there is in every app's
         // own mount table no matter how clean ours is. Only a mount a live injection already
         // serves can be dropped from it: unmounting anything else would take away content the
@@ -2710,6 +2725,18 @@ mod tests {
                 "/mnt/vendor/persist/u"
             ]
         );
+    }
+
+    #[test]
+    fn a_survey_without_the_engine_s_rule_list_is_an_error_not_an_empty_list() {
+        let d = tempfile::tempdir().unwrap();
+        let mi = d.path().join("mountinfo");
+        std::fs::write(&mi, "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n").unwrap();
+        let mi = mi.to_str().unwrap();
+        // No nm on this host, so the list fails as it does on a device whose engine is wedged.
+        let e = super::survey_of(mi).err().expect("an unreadable rule list must not survey");
+        assert!(format!("{e:#}").contains("would not list its rules"), "{e:#}");
+        assert!(super::survey_with(mi, "").expect("an empty list is a real answer").is_empty());
     }
 
     #[test]

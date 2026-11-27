@@ -1950,9 +1950,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     if let Err(e) = &surveyed {
         f.push(Finding {
             level: Level::Unmeasured,
-            check: "mount table not readable",
+            check: "mount survey did not run",
             detail: format!(
-                "the mount table could not be read ({e:#}), so NO mount check ran. This is not \"no mounts\": a module mount left standing is visible to any app that reads its own /proc/self/mountinfo."
+                "{e:#}, so NO mount check ran. This is not \"no mounts\": a module mount left standing is visible to any app that reads its own /proc/self/mountinfo."
             ),
         });
     }
@@ -2054,16 +2054,16 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding { level, check, detail });
     }
 
-    let elsewhere = match crate::absorb::survey_elsewhere_checked() {
-        Some(v) => v,
-        None => {
+    let elsewhere = match crate::absorb::survey_elsewhere() {
+        Ok(v) => v,
+        Err(e) => {
             f.push(Finding {
                 level: Level::Unmeasured,
                 check: "foreign mount in another namespace",
-                detail: "our own mount namespace could not be read, so no other process's \
-                         mount table could be compared against it. Whether another namespace \
-                         carries a mount this one cannot see was not established."
-                    .to_string(),
+                detail: format!(
+                    "{e:#}. Whether another namespace carries a mount this one cannot see was \
+                     not established."
+                ),
             });
             Vec::new()
         }
