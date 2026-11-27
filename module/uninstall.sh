@@ -87,7 +87,7 @@ for _abi in arm64-v8a armeabi-v7a x86_64 x86; do
     # the next reboot, and any mapping of it reads "(deleted)". Clearing the
     # table makes the uninstall take effect now.
     if [ -x "$_nmcli" ]; then
-        if _nmto 15 "$_nmcli" c >/dev/null 2>&1; then
+        if _nmto 15 "$_nmcli" clear >/dev/null 2>&1; then
             _nmlog "engine rule table cleared"
         else
             _nmlog "⚠ could not clear the engine rule table - injected paths keep being served until the next reboot"
