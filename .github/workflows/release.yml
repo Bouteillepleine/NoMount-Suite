@@ -48,13 +48,30 @@ jobs:
   build:
     uses: ./.github/workflows/build.yaml
 
+  # The engine gates, for this commit, in this run. v1.3.218 went public 20 minutes before
+  # the push-triggered matrix of the same commit had a verdict. All ten versions plus the
+  # link and the qemu smoke run: `only` stays empty so nothing is filtered out.
+  engine:
+    uses: ./.github/workflows/hookless-matrix.yml
+    with:
+      only: ''
+
   publish:
-    needs: build
+    needs: [build, engine]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
     steps:
+      - name: The engine smoke run passed
+        env:
+          SMOKE: ${{ needs.engine.outputs.smoke }}
+        run: |
+          [ "$SMOKE" = passed ] || {
+            echo "::error::hookless-matrix's smoke job reported '${SMOKE:-nothing}', not 'passed' - it was skipped or did not finish"
+            exit 1; }
+          echo "engine matrix, link and qemu smoke passed for $GITHUB_SHA"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: CHANGELOG.md
