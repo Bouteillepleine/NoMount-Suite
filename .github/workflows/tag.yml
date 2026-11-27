@@ -64,6 +64,17 @@ jobs:
           # no-op, not a red X telling the author to bump the version they did not change.
           # A draft is not a release: no tag, and its assets 404 for every device.
           if [ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null)" = false ]; then
+            # Published is not finished: the update.json push is the run's last step, so a run
+            # that failed after going public left every manager on the previous version, and
+            # this said "nothing to do" in green on each push after it.
+            for f in update.json update-lkm.json; do
+              live=$(jq -r .version "$f" 2>/dev/null || echo none)
+              if [ "$live" != "$tag" ] && [ "$(printf '%s\n%s\n' "$live" "$tag" | sort -V | tail -n 1)" = "$tag" ]; then
+                echo "::error::$tag is published, but $f on this commit still offers $live."
+                echo "::error::The run that published it stopped after going public: use 'Re-run failed jobs' on that run."
+                exit 1
+              fi
+            done
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             echo "Release $tag already exists - nothing to do."
             exit 0
