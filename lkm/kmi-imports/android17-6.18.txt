@@ -1,0 +1,3 @@
+# android17-6.18: imports the KMI branch does not export (kernel/common f2cb2a697d85, built untrimmed from source: kernel/prebuilts/6.18 has no GKI yet).
+# ko-loader and ksud insmod bind these from /proc/kallsyms; plain insmod cannot load the module.
+# scripts/kmi-imports.py fails the lkm-smoke job when this list and the module disagree.

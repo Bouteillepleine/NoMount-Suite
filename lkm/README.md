@@ -224,7 +224,7 @@ load". A third proves the second.
 | where | what it does | cost |
 | :--- | :--- | :--- |
 | **`.github/workflows/lkm-build.yml`** - *NoMount LKM - out-of-tree build* | compile gate across all ten kernels, on every push to `main` touching `lkm/**`, `hookless/src/**` or the workflow itself. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. Dispatchable with `only: 4.9,6.12` to run a subset. | ~10 min |
-| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the seven modules that actually ship (the android17-6.18 row is built and held back until a kdir matches its KMI). One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so modpost checks every import against an export table - the untrimmed one; `lkm-smoke` checks them against what a stock GKI exports. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
+| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the eight modules that ship. The android17-6.18 row builds against the android17-6.18 KMI branch at a pinned commit (its image's own tree is the -lts branch) and ships an empty `__versions` like 6.12; with no GKI 6.18 prebuilt published, `lkm-smoke` boots a stock kernel built from that same commit. One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so modpost checks every import against an export table - the untrimmed one; `lkm-smoke` checks them against what a stock GKI exports. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
 | **the `lkm-smoke` job in `.github/workflows/build.yaml`** | takes each module, ko-loader and `nm` out of the packaged `01_` zip, checks the module's imports against `lkm/kmi-imports/<kmi>.txt` and the GKI's `System.map`, boots Google's GKI build of that KMI (`kernel/prebuilts/<ver>/arm64`, pinned by commit and sha256) under qemu, loads the module and runs `tests/qemu/smoke.py`'s checks. | ~3 min |
 
 There is no dispatch-only "build me a loadable module" workflow. An earlier
@@ -251,7 +251,8 @@ the size of `struct module`. CI pins each KMI's own `module_layout` value and
 fails a module that carries another. The android16-6.12 module ships an empty
 `__versions` on purpose - its DDK image computes different CRCs from Google's for
 every symbol - so on 6.12 the kernel compares nothing and logs "no symbol version
-for module_layout". Past those checks, loading is a bet on "same KMI => same
+for module_layout". The android17-6.18 module does the same: it is built from the KMI
+branch with no `Module.symvers`, so it has no CRCs to carry. Past those checks, loading is a bet on "same KMI => same
 struct layout", the GKI contract, which is why `module/lkm-load.sh` uses neither
 ko-loader nor `ksud insmod` for a module whose KMI it had to guess; such a module
 loads only on a kernel that exports everything it imports. To see what you have:

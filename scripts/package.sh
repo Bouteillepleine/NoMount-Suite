@@ -8,12 +8,12 @@ RELEASE_DIR="$PROJECT_ROOT/release"
 
 # How many engine modules the 01_ (LKM) zip must carry. The source of truth is the
 # ko-build matrix in .github/workflows/build.yaml (android12-5.10, android13-5.10,
-# android13-5.15, android14-5.15, android14-6.1, android15-6.6, android16-6.12; the
-# android17-6.18 row is built but held back), and build.yaml asserts the same number after staging them. Both
+# android13-5.15, android14-5.15, android14-6.1, android15-6.6, android16-6.12,
+# android17-6.18), and build.yaml asserts the same number after staging them. Both
 # have to move together; a zip built with fewer is an LKM zip that boots to nothing
 # on the KMIs it is missing, which nothing downstream can detect.
 # Override only for a local partial build, never for a release:  NM_LKM_EXPECT=3 ...
-LKM_EXPECT="${NM_LKM_EXPECT:-7}"
+LKM_EXPECT="${NM_LKM_EXPECT:-8}"
 
 CURRENT_VERSION="$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 VERSION=""

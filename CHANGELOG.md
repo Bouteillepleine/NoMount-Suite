@@ -21,7 +21,7 @@
 - [engine] It no longer adds files where non-root callers create entries, and tmpfs is no longer a target.
 - [engine] A listing no longer fails with ENOMEM while many files are being added to its directory.
 - [LKM] The 6.12 module loads again on GKI kernels: v1.3.218's carried symbol versions no 6.12 kernel accepts.
-- [LKM] No 6.18 module ships until one is built against its KMI; a 6.18 kernel needs NoMount built in.
+- [LKM] A 6.18 module ships, built against the android17-6.18 KMI branch.
 - [LKM] After a kernel update within the same KMI, the module loads instead of staying down until a reinstall.
 - [LKM] Directories it adds to an overlay partition are numbered next to their stock siblings, as the built-in engine does.
 - [LKM] A module that does not load leaves every candidate tried and the kernel's reason in boot.log, and loading the copy kept from before an update is logged as a warning naming both builds.

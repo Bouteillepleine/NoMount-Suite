@@ -231,9 +231,12 @@ jobs:
           # empty = keep the image's modpost and ship an empty __versions, which loads with a
           # "no symbol version" warning. 6.12 is empty: its DDK CRCs (gendwarfksyms) differ from
           # Google's for every KMI symbol, type-free ones included, so v1.3.218's could not load.
-          # ship: false builds and gates the row but keeps it out of the zip. 6.18's image is built
-          # from android17-6.18-lts, whose struct-bearing CRCs differ from the KMI: an empty table
-          # there would load a module laid out for another kernel.
+          # ship: false builds and gates the row but keeps it out of the zip.
+          # ksrc: a kernel/common commit to build against instead of the image's own tree. 6.18's
+          # image is built from android17-6.18-lts, whose layout is not the KMI's, so the row
+          # prepares the android17-6.18 KMI branch itself at that commit and keeps only the
+          # image's toolchain; versions stay empty as on 6.12, which is safe exactly because the
+          # tree is the KMI's.
           # To move one, read the new digest off the registry rather than trusting a pull:
           #   TOKEN=$(curl -s 'https://ghcr.io/token?scope=repository%3Aylarod%2Fddk%3Apull&service=ghcr.io' | jq -r .token)
           #   curl -sI -H "Authorization: Bearer $TOKEN" \
@@ -246,7 +249,7 @@ jobs:
           - { kmi: android14-6.1,  tag: '20251104', digest: 'sha256:b71b1fbde7234a2784bb8f8cf367ecc2ed50c5e4544a924135fa3e9ef96cf3bd', versions: stock, layout: '0xea759d7f', ship: true }
           - { kmi: android15-6.6,  tag: '20251104', digest: 'sha256:e2a1c36aef4837865d0d269401f1403fdefda1b39affdb7a9eab66735f6defff', versions: stock, layout: '0x4e276f37', ship: true }
           - { kmi: android16-6.12, tag: '20251104', digest: 'sha256:86216ff10dbe3e6d73477ac7fc3512414f394429b18b2f7be32182f34700ebd1', versions: empty, layout: '0x797f2b3e', ship: true }
-          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268', versions: stock, layout: '0xee9c6aa0', ship: false }
+          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268', versions: empty, layout: '0xee9c6aa0', ship: true, ksrc: 'f2cb2a697d859f06dfce050650b418e904f98ff7' }
     container:
       image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}@${{ matrix.digest }}
     steps:
@@ -255,8 +258,31 @@ jobs:
       - name: Build
         run: |
           set -eu
-          test -s "$KDIR/Module.symvers" || {
-            echo "::error::no Module.symvers in the DDK tree"; exit 1; }
+          KSRC=""
+          modpost_warn=""
+          if [ -n "${{ matrix.ksrc }}" ]; then
+            # The KMI branch at a pinned commit, prepared with the image's compiler. Rust is not
+            # in the image, so Kconfig drops RUST and the integer normalisation of kCFI tags it
+            # selects; a module hashed without it fails the GKI's CFI check on init_module, so
+            # it is set by hand and asserted. modules_prepare writes no Module.symvers, which
+            # an empty __versions does not need: modpost only warns about the imports.
+            KSRC="$RUNNER_TEMP/kmi-src"
+            mkdir -p "$KSRC"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              "https://android.googlesource.com/kernel/common/+archive/${{ matrix.ksrc }}.tar.gz" | tar -xz -C "$KSRC"
+            make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig > /dev/null
+            "$KSRC/scripts/config" --file "$KSRC/.config" -e CFI_ICALL_NORMALIZE_INTEGERS
+            make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig > /dev/null
+            grep -qx 'CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y' "$KSRC/.config" || {
+              echo "::error::the ${{ matrix.ksrc }} tree would not take CFI_ICALL_NORMALIZE_INTEGERS"; exit 1; }
+            make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
+            KDIR="$KSRC"
+            modpost_warn="KBUILD_MODPOST_WARN=1"
+            echo "built against kernel/common ${{ matrix.ksrc }} ($(make -s -C "$KSRC" kernelversion))"
+          else
+            test -s "$KDIR/Module.symvers" || {
+              echo "::error::no Module.symvers in the DDK tree"; exit 1; }
+          fi
           # The DDK images build modpost with check_exports() commented out, so a module built
           # with it gets an empty __versions: no CRC is checked when it loads, and every load
           # logs "no symbol version for module_layout" naming it. Rebuild modpost from the
@@ -291,13 +317,14 @@ jobs:
           fi
           # The image's own kernel source, for overlayfs/ovl_entry.h (lkm/Makefile, NM_OVL_SRC).
           ovl_src=/opt/ddk/src/${{ matrix.kmi }}/fs
+          [ -z "$KSRC" ] || ovl_src="$KSRC/fs"
           if [ -f "$ovl_src/overlayfs/ovl_entry.h" ]; then
             echo "overlay counter: building with $ovl_src/overlayfs/ovl_entry.h"
           else
             echo "::warning::no overlayfs/ovl_entry.h in this image: ${{ matrix.kmi }} places overlay dirs above every inode"
             ovl_src=""
           fi
-          make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
+          make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang $modpost_warn \
                M="$GITHUB_WORKSPACE/lkm" ${ovl_src:+NM_OVL_SRC=$ovl_src} modules
           install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
           # -d leaves .BTF behind, and a module carrying BTF that does not match the
@@ -516,23 +543,23 @@ jobs:
           find artifacts -name 'nomount-*.ko' -exec cp {} module/lkm/ \;
           n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
           find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
-          [ "$n" -eq 7 ] || { echo "::error::expected 7 engine modules (8 rows, 6.18 held), got $n"; exit 1; }
-          # The count alone is satisfied by seven copies of one module. Each ko job now
+          [ "$n" -eq 8 ] || { echo "::error::expected 8 engine modules, one per kmi-modules row, got $n"; exit 1; }
+          # The count alone is satisfied by eight copies of one module. Each ko job now
           # asserts its own vermagic against its KMI, which catches a row built against
           # the wrong image; this catches the other half -- the artifact download or the
           # `cp` above collapsing two rows onto one file, where every name is right and
-          # one kernel silently gets another's module. Seven names, seven contents.
+          # one kernel silently gets another's module. Eight names, eight contents.
           d=$(find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + \
               | awk '{print $1}' | sort -u | wc -l)
           [ "$d" -eq 7 ] || {
-            echo "::error::7 engine modules but only $d distinct, so a KMI is shipping"
+            echo "::error::8 engine modules but only $d distinct, so a KMI is shipping"
             echo "::error::another KMI's module under its own name"
             find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + | sort
             exit 1; }
           # Said out loud, because a gate that prints nothing when it passes cannot be
           # told from one that did not run -- which is how CONFIG_OVERLAY_FS and the
           # -Werror #warning both hid for weeks. One line, and the log shows the check.
-          echo "7 engine modules, $d distinct"
+          echo "8 engine modules, $d distinct"
 
       - name: Setup zig
         env:
@@ -642,9 +669,68 @@ jobs:
   # the decoded file is checked against the sha256 below. To move one, pick the commit, then
   #   curl -s "https://android.googlesource.com/kernel/prebuilts/<ver>/arm64/+/<commit>/<file>?format=TEXT" | base64 -d | sha256sum
   # for kernel-<ver>-gz and System.map, and regenerate lkm/kmi-imports/<kmi>.txt against it.
+  # A KMI with no GKI prebuilt to boot (kernel/prebuilts/6.18 is empty) gets a stock kernel
+  # built from the same commit its module row builds against, in the same pinned image.
+  # LTO and BTF are off for build time; CFI and its integer normalisation stay as GKI has
+  # them, because that is what a module's indirect calls are checked against. Cached by
+  # commit, so only a moved pin pays the build.
+  gki-src-kernel:
+    name: stock ${{ matrix.kmi }} kernel from source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268', ksrc: 'f2cb2a697d859f06dfce050650b418e904f98ff7' }
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}@${{ matrix.digest }}
+    steps:
+      - name: Restore the kernel built for this commit
+        id: kcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: gki-src
+          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v1
+
+      - name: Build the stock kernel
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          KSRC="$RUNNER_TEMP/k"; OUT="$RUNNER_TEMP/kout"
+          mkdir -p "$KSRC" "$OUT" gki-src
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://android.googlesource.com/kernel/common/+archive/${{ matrix.ksrc }}.tar.gz" | tar -xz -C "$KSRC"
+          M="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=$OUT"
+          make -C "$KSRC" $M gki_defconfig > /dev/null
+          "$KSRC/scripts/config" --file "$OUT/.config" -e CFI_ICALL_NORMALIZE_INTEGERS \
+            -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE -d DEBUG_INFO_BTF -d WERROR
+          make -C "$KSRC" $M olddefconfig > /dev/null
+          for want in CONFIG_CFI=y CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y CONFIG_LTO_NONE=y; do
+            grep -qx "$want" "$OUT/.config" || { echo "::error::$want did not survive olddefconfig"; exit 1; }
+          done
+          make -C "$KSRC" $M -j"$(nproc)" Image > "$RUNNER_TEMP/kbuild.log" 2>&1 || {
+            tail -40 "$RUNNER_TEMP/kbuild.log"; exit 1; }
+          cp "$OUT/arch/arm64/boot/Image" "$OUT/System.map" gki-src/
+          grep -aom1 'Linux version [0-9][^ ]*' gki-src/Image
+
+      - name: Keep it for the next run
+        if: steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: gki-src
+          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gki-src-${{ matrix.kmi }}
+          path: gki-src/
+          if-no-files-found: error
+          retention-days: 1
+
   lkm-smoke:
     name: load ${{ matrix.kmi }} on stock GKI
-    needs: package
+    needs: [package, gki-src-kernel]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -666,6 +752,8 @@ jobs:
               kernel: 1b38f400616f07b0f5f69b7e5acc5ff99259fca762bc2c4bcaa1245fccece153, map: c8ad13a572a182a2cfa4f5c56788b4f8d7606676673280fe35be390a77fbb6b3 }
           - { kmi: android16-6.12, ver: '6.12', commit: 318576752b27af3d328e6deb5e6aa29b08f762c9, build: 15076761, cpu: 'max,pauth-impdef=on',
               kernel: 04a379153f2939f33ebbd5ef63dd4f24f9027130b7fb7bfeb6e2b85fde5355ea, map: c8e8e71c197222c117bb798156e69315dcba1a69f00d62d808e334c3128177c8 }
+          # No prebuilt yet: the kernel comes from gki-src-kernel, built from the module's commit.
+          - { kmi: android17-6.18, ver: '6.18', src: true, cpu: 'max,pauth-impdef=on' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -704,7 +792,15 @@ jobs:
             echo "::error::the 01_ zip ships $n engine modules and this job has $ROWS rows - add a row for the new KMI"
             exit 1; }
 
+      - name: Take the kernel built from source
+        if: ${{ matrix.src }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gki-src-${{ matrix.kmi }}
+          path: ${{ runner.temp }}/gki
+
       - name: Fetch the pinned GKI kernel and System.map
+        if: ${{ !matrix.src }}
         env:
           VER: ${{ matrix.ver }}
           COMMIT: ${{ matrix.commit }}
