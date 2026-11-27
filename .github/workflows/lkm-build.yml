@@ -332,15 +332,17 @@ jobs:
           {
             echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
             echo "- undefined in nomount.ko: **$u** (no Module.symvers at this stage - expected)"
-            echo "- exported by this kernel: $e"
+            echo "- EXPORT_SYMBOL in this tree's source: $e"
             echo "- **needing a kallsyms redirect: $r**"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$r" -eq 0 ]; then
-            echo "All $u undefined symbols are exported by this kernel."
-            echo "The module links cleanly against a fully built tree; no shim needed."
+            # The source exports more than a GKI release, which trims to its KMI list: what a
+            # stock kernel exports is build.yaml lkm-smoke's check (lkm/kmi-imports/).
+            echo "All $u undefined symbols carry EXPORT_SYMBOL in this tree's source."
+            echo "The module links cleanly against an untrimmed build of it; no shim needed."
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "✅ every unresolved symbol is exported - links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ every unresolved symbol is exported by the untrimmed tree - links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "These are NOT exported and need an NM_SYM() entry in lkm/nm_oot.h:"
             cat "$out"
