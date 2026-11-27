@@ -558,7 +558,7 @@ jobs:
           # one kernel silently gets another's module. Eight names, eight contents.
           d=$(find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + \
               | awk '{print $1}' | sort -u | wc -l)
-          [ "$d" -eq 7 ] || {
+          [ "$d" -eq 8 ] || {
             echo "::error::8 engine modules but only $d distinct, so a KMI is shipping"
             echo "::error::another KMI's module under its own name"
             find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + | sort
