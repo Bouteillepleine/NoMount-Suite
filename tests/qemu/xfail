@@ -1,0 +1,4 @@
+# Checks that fail today for a known, tracked reason. smoke.py reports them as XFAIL; once
+# one passes it reports XPASS and fails the run until its line is removed here, so a fix
+# turns into a hard assert in the change that lands it.
+seek_end_erofs  # engine-oracles-1: lseek(SEEK_END) on a hijacked erofs dir answers the stock size, stat the merged one

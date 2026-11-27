@@ -40,12 +40,20 @@ on:
         type: string
         required: false
         default: ''
+    outputs:
+      # release.yml publishes only on 'passed': a smoke job that was filtered out or never
+      # finished leaves this empty, and an empty verdict must not read as a green gate.
+      smoke:
+        description: "'passed' once the link job's kernel ran the engine smoke checks"
+        value: ${{ jobs.smoke.outputs.verdict }}
 
 permissions:
   contents: read
 
+# github.workflow is the CALLER's name when release.yml calls this, so a release run does not
+# queue behind (or get replaced by) the push-triggered run of the same commit.
 concurrency:
-  group: hookless-matrix-${{ github.ref }}
+  group: hookless-matrix-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -482,6 +490,8 @@ jobs:
     name: link 6.12 (no cloak patches)
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    outputs:
+      ran: ${{ steps.sel.outputs.run }}
     env:
       KREF: android16-6.12
       CCACHE_MAXSIZE: '3G'
@@ -588,7 +598,20 @@ jobs:
           aarch64-linux-gnu-nm out/vmlinux | grep -q ' vfs_map_meta_override$' || {
             echo "FATAL: vmlinux linked, but without the engine in it"; exit 1; }
           echo "LINK_OK"
+          # The smoke job below boots this.
+          make $MAKEOPTS -j"$(nproc)" Image >> /tmp/nm_link.log 2>&1 || {
+            tail -20 /tmp/nm_link.log; echo "FATAL: vmlinux linked but make Image failed"; exit 1; }
+          ls -l out/arch/arm64/boot/Image
           ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
+
+      - name: Keep the kernel for the smoke job
+        if: steps.sel.outputs.run == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-image-6.12
+          path: ksrc/out/arch/arm64/boot/Image
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
@@ -603,4 +626,58 @@ jobs:
         with:
           name: log-link-6.12
           path: /tmp/nm_link.log
+          if-no-files-found: ignore
+
+  # Everything above compiles or links the engine; this runs it. The link job's kernel boots
+  # under qemu with an initramfs around tests/qemu/smoke-init.c, and the repo's own nm drives
+  # it on an erofs and an ext4 victim: a served file reads the module's bytes, an injected
+  # name lists, a uid on the hide list gets the stock view (FIONREAD included), del and
+  # clear put stock back. Known issues are tests/qemu/xfail: they may fail, and passing one
+  # fails the run until its line goes, so a fix becomes a hard assert in the same change.
+  smoke:
+    name: run the 6.12 engine under qemu
+    needs: link
+    if: needs.link.outputs.ran == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      verdict: ${{ steps.smoke.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install qemu and the arm64 toolchain
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm erofs-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          qemu-system-aarch64 --version | head -1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: engine-image-6.12
+          path: kimage
+
+      - name: Build nm for arm64
+        run: |
+          set -eu
+          aarch64-linux-gnu-gcc -Os -static -nostdlib -ffreestanding -fno-stack-protector \
+            -fno-asynchronous-unwind-tables -Wl,--entry=_start userspace/src/nm.c -o "$RUNNER_TEMP/nm-arm64"
+          readelf -hW "$RUNNER_TEMP/nm-arm64" | grep -qE '^ *Machine: *AArch64' || {
+            echo "::error::nm did not build as an AArch64 binary"; exit 1; }
+
+      - name: Boot it and run the checks
+        id: smoke
+        run: |
+          set -eu
+          python3 -I tests/qemu/smoke.py --mode builtin --kernel kimage/Image \
+            --nm "$RUNNER_TEMP/nm-arm64" --log "$RUNNER_TEMP/smoke-console.log"
+          echo "verdict=passed" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the console log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-console-6.12
+          path: ${{ runner.temp }}/smoke-console.log
           if-no-files-found: ignore
