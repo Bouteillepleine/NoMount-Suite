@@ -654,7 +654,8 @@ mod tests {
             resolved_is_allowed(Path::new("/product/app/Foo"), Path::new("/product/app/Foo"))
                 .is_ok()
         );
-        assert!(crate::mount::can_whiteout(Path::new("/system/vendor")).is_ok());
+        assert!(crate::mount::can_whiteout_with(Path::new("/system/vendor"), &|_| true).is_ok());
+        assert!(crate::mount::can_whiteout_with(Path::new("/system/vendor"), &|_| false).is_err());
         assert!(crate::mount::can_whiteout(Path::new("/vendor")).is_err());
     }
 

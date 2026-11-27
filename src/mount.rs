@@ -246,6 +246,14 @@ fn fold_nested_partition(target: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
+    can_whiteout_with(target, &|p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
+}
+
+/// `real_dir`: the path is a directory, not a symlink to one.
+pub(crate) fn can_whiteout_with(
+    target: &Path,
+    real_dir: &dyn Fn(&Path) -> bool,
+) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
     };
@@ -255,9 +263,16 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     if is_partition_root(target) {
         return Err("a bare partition root (masking one bootloops zygote)");
     }
-    // The bare nested root (`/system/vendor`) stays allowed: validate() refuses it when it
-    // resolves to a partition root, and as a plain directory it is a debloat target.
+    // A bare nested root (`/system/vendor`) is a stub or debloat directory only while a real
+    // partition sits at `/vendor`. Where `/system_ext` is the symlink (a device upgraded from
+    // Android 10) or absent, `/system/system_ext` IS the partition, and canonicalising in
+    // validate() cannot see that; plan_tree's markers never go through validate() at all.
     let folded = fold_nested_partition(target);
+    if let Some(f) = folded.as_deref().filter(|f| is_partition_root(f)) {
+        if !(real_dir(target) && real_dir(f)) {
+            return Err("a bare partition root (masking one bootloops zygote)");
+        }
+    }
     if std::iter::once(target).chain(folded.as_deref()).any(is_boot_critical) {
         return Err("a path init, the linker or zygote cannot start without (masking it \
                     bootloops the device)");
@@ -3302,6 +3317,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_nested_root_is_refused_unless_both_it_and_the_partition_are_real_dirs() {
+        for p in ["/system/system_ext", "/system/product", "/system/vendor", "/vendor/odm"] {
+            let p = Path::new(p);
+            assert!(can_whiteout_with(p, &|_| false).is_err(), "{p:?}: no separate partition");
+            assert!(
+                can_whiteout_with(p, &|q| q != p).is_err(),
+                "{p:?}: a symlink onto the partition"
+            );
+            assert!(
+                can_whiteout_with(p, &|q| q == p).is_err(),
+                "{p:?}: the partition lives here, the top-level name is the link"
+            );
+            assert!(
+                can_whiteout_with(p, &|_| true).is_ok(),
+                "{p:?}: a stub beside a real partition is an ordinary debloat target"
+            );
+        }
+        assert!(can_whiteout_with(Path::new("/system/system_ext/app/Foo"), &|_| false).is_ok());
+    }
+
+    #[test]
     fn whiteout_refuses_partition_roots_and_non_rom() {
         assert!(can_whiteout(Path::new("/my_stock")).is_err());
         assert!(can_whiteout(Path::new("/product")).is_err());
@@ -3361,7 +3397,6 @@ mod tests {
             "/system/framework/foo.jar",
             "/vendor/etc/foo.conf",
             "/my_product/etc",
-            "/system/vendor",
         ] {
             assert!(can_whiteout(Path::new(p)).is_ok(), "{p} is an ordinary debloat target");
         }
