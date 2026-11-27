@@ -70,6 +70,13 @@ int __weak pathhide_get_rule(int idx, char *out, size_t outsz) { return -ENOSYS;
 #define nm_have_pathhide() (pathhide_get_rule(0, NULL, 0) != -ENOSYS)
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
+
+/* Orders the rule stores before the new gen, pairing with the acquire where a reader stamps it. */
+static inline void nm_rule_gen_bump(void)
+{
+    smp_mb__before_atomic();
+    atomic_inc(&nm_rule_gen);
+}
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
 static const struct cred *nm_root_cred;
@@ -385,7 +392,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     struct nomount_child_node *child;
     bool found = false;
 
-    rule_info->gen = (u32)atomic_read(&nm_rule_gen);
+    rule_info->gen = (u32)atomic_read_acquire(&nm_rule_gen);
     rule_info->this_dir = NULL;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
@@ -671,13 +678,14 @@ static inline loff_t nm_tail_gap(const struct super_block *sb, loff_t base, loff
 static __always_inline bool nm_shareable_stock(umode_t vmode, const struct path *s_path,
                                                const struct super_block *vsb, u32 flags)
 {
+    struct dentry *sd = READ_ONCE(s_path->dentry);
     struct inode *si;
 
     if (!(flags & NM_FLAG_SHADOWS_STOCK) ||
         (flags & (NM_FLAG_WHITEOUT | NM_FLAG_VIRTUAL_DIR | NM_FLAG_STOCK_ONLY)) ||
-        !s_path->dentry || nm_victim_is_overlay(vsb))
+        !sd || nm_victim_is_overlay(vsb))
         return false;
-    si = d_backing_inode(s_path->dentry);
+    si = d_backing_inode(sd);
     return si && S_ISREG(si->i_mode) && S_ISREG(vmode);
 }
 
@@ -1795,8 +1803,8 @@ static void nm_ltail_free(struct nm_ltail *t)
     t->n = 0;
 }
 
-static int nm_ltail_collect(struct nomount_dir_node *d, bool skip_shadow, unsigned int extra,
-                            struct nm_ltail *t)
+static int __nm_ltail_collect(struct nomount_dir_node *d, bool skip_shadow, unsigned int extra,
+                              struct nm_ltail *t)
 {
     struct nomount_child_node *ch;
     unsigned int cap = extra, bytes = 0, n = 0, off = 0;
@@ -1846,6 +1854,17 @@ static int nm_ltail_collect(struct nomount_dir_node *d, bool skip_shadow, unsign
     }
     t->n = n;
     return 0;
+}
+
+/* -EAGAIN: more children were added between the count and the copy; count again. */
+static int nm_ltail_collect(struct nomount_dir_node *d, bool skip_shadow, unsigned int extra,
+                            struct nm_ltail *t)
+{
+    int err, tries = 64;
+
+    while ((err = __nm_ltail_collect(d, skip_shadow, extra, t)) == -EAGAIN && --tries)
+        cond_resched();
+    return err ? -ENOMEM : 0;
 }
 
 /* Emit a sorted array erofs-shaped. At or past the end, f_pos stays where it was. */
@@ -3190,7 +3209,7 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     struct nm_rule_info ri;
     struct dentry *child, *res;
     struct inode *new_inode, *r_child;
-    u32 gen = (u32)atomic_read(&nm_rule_gen);
+    u32 gen = (u32)atomic_read_acquire(&nm_rule_gen);
     bool own_stock = false;
     umode_t s_mode = 0;
     kuid_t s_uid = GLOBAL_ROOT_UID;
@@ -3607,6 +3626,8 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     struct nm_iop *nm_iop;
     struct nomount_dir_node *pdir = NULL;
     struct nm_rule_info rule_info;
+    const unsigned char *dname;
+    unsigned int dlen;
     u32 hash, gen;
     bool injected;
 
@@ -3632,13 +3653,20 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             /* Not shareable: as before this change, a hide-list caller keeps it where there
              * is a stock file to serve, and anyone else re-walks. */
             if (!nm_shareable_stock(ino->i_mode, &rinfo->s_path, ino->i_sb, rinfo->flags) &&
-                !(nm_uid_hidden(rinfo->flags) && rinfo->s_path.dentry))
+                !(nm_uid_hidden(rinfo->flags) && READ_ONCE(rinfo->s_path.dentry)))
                 return -ECHILD;
         }
         return 1;
     }
 
-    gen = (u32)atomic_read(&nm_rule_gen);
+    gen = (u32)atomic_read_acquire(&nm_rule_gen);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+    dname = name->name;
+    dlen = name->len;
+#else
+    dname = dentry->d_name.name;
+    dlen = dentry->d_name.len;
+#endif
 
     injected = dentry->d_inode &&
         (dentry->d_inode->i_op == &nm_file_iops ||
@@ -3670,8 +3698,15 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             if (ii && !nm_info_served(ii) &&
                 (ii->flags & NM_FLAG_SHADOWS_STOCK) && !ii->s_path.dentry)
                 return 0;
-            if (nm_is_passthrough_child(parent_dir, dentry))
+            if (nm_is_passthrough_child(parent_dir, dentry)) {
+                /* Module-only child, unserved caller: absent, as with nested rules below. */
+                if (ii && !nm_info_served(ii) &&
+                    !(ii->flags & (NM_FLAG_SHADOWS_STOCK | NM_FLAG_STOCK_ONLY))) {
+                    nm_reval_fresh(dentry, gen);
+                    return nm_absent_errno(dentry->d_inode, flags);
+                }
                 return nm_reval_fresh(dentry, gen);
+            }
             return 0;
         }
         if (d_is_negative(dentry)) {
@@ -3681,10 +3716,9 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return 1;
     }
 
-    hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
+    hash = full_name_hash(NULL, dname, dlen);
     /* Matched whoever is asking; who is served is decided below from the scope. */
-    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info,
-                              false, true)) {
+    if (nomount_get_rule_info(pdir, dname, dlen, hash, &rule_info, false, true)) {
         bool served = nm_rinfo_served(&rule_info);
 
         nm_put_rule_info(&rule_info);
@@ -4224,7 +4258,7 @@ static void nomount_hijacked_put_super(struct super_block *sb)
             any = true;
         }
         if (any)
-            atomic_inc(&nm_rule_gen);
+            nm_rule_gen_bump();
         /* A recycled anon dev number must not inherit this filesystem's placement state. */
         nm_forget_dev_caches(sb->s_dev);
         mutex_unlock(&nomount_write_mutex);
@@ -4433,9 +4467,10 @@ out:
 }
 
 /* Only the filesystems the engine is built for. kernfs (sysfs, cgroup) identifies its
- * superblocks by s_op pointer and BUG()s on a foreign one. Checked before ANY hijack of an
- * inode on the superblock, not only its s_op: a refused one would otherwise keep our
- * per-inode op copies, and code comparing f_op against its own table would miss. */
+ * superblocks by s_op pointer and BUG()s on a foreign one. tmpfs is out: shmem_alloc_inode
+ * leaves its private part stale and shmem_destroy_inode reads it by i_mode. Checked before
+ * ANY hijack of an inode on the superblock, not only its s_op: a refused one would otherwise
+ * keep our per-inode op copies, and code comparing f_op against its own table would miss. */
 static bool nm_sb_supported(const struct super_block *sb)
 {
     switch (sb->s_magic) {
@@ -4443,7 +4478,6 @@ static bool nm_sb_supported(const struct super_block *sb)
     case EXT4_SUPER_MAGIC:
     case F2FS_SUPER_MAGIC:
     case SQUASHFS_MAGIC:
-    case TMPFS_MAGIC:
     case RAMFS_MAGIC:
 #ifdef OVERLAYFS_SUPER_MAGIC
     case OVERLAYFS_SUPER_MAGIC:
@@ -6334,7 +6368,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                      memcmp(ex->deny_appid, target_rule->deny_appid,
                             ex->deny_n * sizeof(ex->deny_appid[0])))) {
                     if (nm_widen_scope_up(ex))
-                        atomic_inc(&nm_rule_gen);
+                        nm_rule_gen_bump();
                 }
                 found_virtual = true;
                 break;
@@ -7371,7 +7405,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     if (err != 0) {
         if (victim) {
             hash_add_rcu(nomount_rules_ht, &victim->vpath_node, victim->v_hash);
-            atomic_inc(&nm_rule_gen);
+            nm_rule_gen_bump();
         }
         nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, NULL);
         mutex_unlock(&nomount_write_mutex);
@@ -7380,7 +7414,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     }
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
-    atomic_inc(&nm_rule_gen);
+    nm_rule_gen_bump();
     nm_pin_module();
 
     nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, rule);
@@ -7451,7 +7485,7 @@ static void __nomount_clear_all(bool is_exit)
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
         nm_detach_rule_locked(rule, &r_victims, false);
     }
-    atomic_inc(&nm_rule_gen);
+    nm_rule_gen_bump();
     synchronize_rcu();
     idr_destroy(&nomount_uid_idr);
     hlist_for_each_entry_safe(rule, tmp, &r_victims, victim_node) {
@@ -7580,7 +7614,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
             }
             pos += vp_len;
         }
-        atomic_inc(&nm_rule_gen);
+        nm_rule_gen_bump();
         mutex_unlock(&nomount_write_mutex);
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
         char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
@@ -7593,7 +7627,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         mutex_lock(&nomount_write_mutex);
         if (__nomount_del_rule(v_path, v_len, &scope, &r_victims) == -EBUSY)
             busy = true;
-        atomic_inc(&nm_rule_gen);
+        nm_rule_gen_bump();
         mutex_unlock(&nomount_write_mutex);
     } else {
         return -EINVAL;
