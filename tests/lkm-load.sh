@@ -478,5 +478,75 @@ check "the LKM zip is told apart for the cards" "$(lkmzip)" "lkm"
 echo 'updateJson=https://example.invalid/main/update.json' > "$WORK/bl/mod/module.prop"
 check "  and the lite zip is not" "$(lkmzip)" "lite"
 
+echo
+echo "a load that fails says why"
+
+insert_setup
+mkdir -p "$WORK/ins/bin"
+printf '#!/bin/sh\ncase "$1" in -h) echo "  insmod   Load a kernel module" ;; insmod) echo "insmod: Exec format error"; exit 1 ;; esac\n' \
+	> "$WORK/ins/bin/ksud"
+chmod 755 "$WORK/ins/bin/ksud"
+rm -f "$NM_LKM_LOADER"
+: > "$WORK/ins/said"
+say_to_file() { printf '%s\n' "$*" >> "$WORK/ins/said"; }
+NM_LKM_SAY=say_to_file
+PATH="$WORK/ins/bin:$_op"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1
+PATH=$_op
+check "ksud insmod's own refusal is passed on, not thrown away" \
+	"$(grep -c 'insmod: Exec format error' "$WORK/ins/said")" "1"
+
+dmesg() {
+	printf '[    1.000000][    T1] Booting Linux\n'
+	printf '[    7.980145][   T62] nomount: disagrees about version of symbol module_layout\n'
+	printf '[    8.100000][   T62] nomount: Unknown symbol d_lookup (err -2)\n'
+}
+check "the kernel's refusal lines, without their timestamps" "$(nm_lkm_kernel_reason | tr '\n' '|')" \
+	"nomount: disagrees about version of symbol module_layout|nomount: Unknown symbol d_lookup (err -2)|"
+unset -f dmesg
+printf 'nomount_variant=lkm\000vermagic=6.12.52-4k SMP\0006.12.52\0001.36.7\000' > "$WORK/ins/built.ko"
+check "a module's engine build is read off the file" "$(nm_lkm_build_of "$WORK/ins/built.ko")" "1.36.7"
+
+# The boot path, through lib.sh's real nm_lkm_boot_load: only the device is stubbed.
+boot_load() {
+	(
+		. "$HERE/module/lib.sh"
+		NMDIR="$WORK/b/nm"; BOOTLOG="$NMDIR/boot.log"; MODDIR="$WORK/b/mod"; NM_BOOT_ID="$WORK/b/boot_id"
+		NM_LKM_DEVICE_KO="$NMDIR/nomount.ko"
+		getprop() { echo arm64-v8a; }
+		uname() { if [ "${1:-}" = -r ]; then echo 6.12.69-android16-6-gdevice-4k; else echo Linux; fi; }
+		dmesg() { printf '[    7.980145][   T62] nomount: disagrees about version of symbol module_layout\n'; }
+		PATH="$WORK/b/bin:$_op"
+		nm_lkm_boot_load
+	)
+}
+boot_setup() {
+	rm -rf "$WORK/b"; mkdir -p "$WORK/b/nm" "$WORK/b/mod/lkm" "$WORK/b/mod/bin/arm64-v8a" "$WORK/b/bin"
+	echo "boot-$$" > "$WORK/b/boot_id"
+	echo 'version=vtest' > "$WORK/b/mod/module.prop"
+	cp "$HERE/module/lkm-load.sh" "$WORK/b/mod/lkm-load.sh"
+	printf 'nomount_variant=lkm\000vermagic=6.12.52-4k SMP\0001.36.7\000' > "$WORK/b/mod/lkm/nomount-android16-6.12.ko"
+	# insmod takes only a file named in LOADS; nm answers once something went in.
+	printf '#!/bin/sh\ncase " %s " in *" $(basename "$1") "*) : > "%s"; exit 0 ;; esac\necho "insmod: ERROR: could not insert module $1: Exec format error" >&2\nexit 1\n' \
+		"$1" "$WORK/b/loaded" > "$WORK/b/bin/insmod"
+	printf '#!/bin/sh\nexit 1\n' > "$WORK/b/bin/rmmod"
+	printf '#!/bin/sh\n[ -e "%s" ] && echo "36 1.36.2"\n' "$WORK/b/loaded" > "$WORK/b/mod/bin/arm64-v8a/nm"
+	chmod 755 "$WORK/b/bin/insmod" "$WORK/b/bin/rmmod" "$WORK/b/mod/bin/arm64-v8a/nm"
+}
+blog() { grep -c -- "$1" "$WORK/b/nm/boot.log" 2>/dev/null || true; }
+
+boot_setup ""
+boot_load
+check "boot: a failed load logs each candidate it tried" "$(blog 'trying android16-6.12 (exact KMI match)')" "1"
+check "  and what insmod said" "$(blog 'insmod: ERROR: could not insert module')" "1"
+check "  and the kernel's reason" "$(blog 'kernel: nomount: disagrees about version of symbol module_layout')" "1"
+
+boot_setup "nomount.ko.prev"
+printf 'nomount_variant=lkm\000vermagic=6.12.52-4k SMP\0001.36.2\000' > "$WORK/b/nm/nomount.ko.prev"
+boot_load
+check "boot: a load of the copy kept before the update is a warning, naming both builds" \
+	"$(blog '⚠ engine module loaded from the copy kept before this update (engine 36 1.36.2), not this zip.s (1.36.7)')" "1"
+check "  not the line a normal load logs" "$(blog 'engine module loaded from previous')" "0"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

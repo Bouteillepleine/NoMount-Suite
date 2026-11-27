@@ -126,6 +126,8 @@ if [ -x "$_nm" ]; then
     _eb=""
     case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
     if [ -z "$_ev" ] && [ -z "$_lskip" ] && command -v nm_lkm_load_best >/dev/null 2>&1; then
+        for _zk in "$MODPATH"/lkm/nomount-*.ko; do break; done
+        _zb=$(nm_lkm_build_of "$_zk")
         nm_lkm_load_best "$MODPATH/lkm"; _lrc=$?
         if [ "$_lrc" = 0 ] || [ "$_lrc" = 2 ]; then
             nm_lkm_prune "$MODPATH/lkm"
@@ -137,6 +139,11 @@ if [ -x "$_nm" ]; then
         _eng=1
         if [ "$_lrc" = 0 ]; then
             ui_print "- Prism engine: v${_ev} (module loaded, no reboot needed)"
+            if [ "${NM_LKM_SOURCE:-}" = previous ]; then
+                _pb=${_evl#* }; [ "$_pb" = "$_evl" ] && _pb=unknown
+                ui_print "! It is the module kept from before this update, build ${_pb%% *}:"
+                ui_print "! none of this zip's (build ${_zb:-unknown}) loads on this kernel, so its fixes are not running."
+            fi
         else
             ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
         fi
@@ -197,6 +204,8 @@ if [ -x "$_nm" ]; then
             ui_print "! bundled module loads on it either."
             ui_print "! Flash a NoMount-enabled kernel, or drop a matching"
             ui_print "! nomount.ko at /data/adb/nomount/nomount.ko."
+            command -v nm_lkm_kernel_reason >/dev/null 2>&1 &&
+                nm_lkm_kernel_reason | while IFS= read -r _l; do ui_print "!   kernel: $_l"; done
         fi
         ui_print "!   kernel: $(uname -r)"
         ui_print "!   nm: netlink proto 29, errno ${_nmerrno:-unknown}"

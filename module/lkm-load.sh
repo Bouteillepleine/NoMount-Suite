@@ -29,6 +29,21 @@ nm_lkm_echo() {
 	done
 }
 
+# The kernel's own words for the last refusals. No loader prints them, and without them a
+# failed load is one line: module_layout, a trimmed or protected symbol, vermagic.
+nm_lkm_kernel_reason() {
+	command -v dmesg >/dev/null 2>&1 || return 0
+	dmesg 2>/dev/null |
+		grep -E 'nomount: (disagrees about|Unknown symbol|Protected symbol|version magic|exports protected)|module nomount: ' |
+		tail -n 3 | sed 's/^\(\[[^]]*\] *\)*//'
+}
+
+# The engine build a module file carries (NM_MODULE_VERSION is its one bare x.y.z string).
+nm_lkm_build_of() {
+	[ -f "$1" ] || return 0
+	tr -c '[:print:]' '\n' < "$1" 2>/dev/null | grep -m 1 -xE '1\.[0-9]+\.[0-9]+'
+}
+
 # 0  it loaded and the engine answers.
 # 2  it loaded, but nm_lkm_probe did not answer. A module only loads at all if
 #    nomount_init() returned 0, which means the netlink socket is up - so the
@@ -70,10 +85,11 @@ nm_lkm_insert() {
 
 	if [ "$_strict" != strict ] && command -v ksud >/dev/null 2>&1 &&
 	   ksud -h 2>&1 | grep -qE '(^|[[:space:]])insmod([[:space:]]|$)'; then
-		if ksud insmod "$_ko" >/dev/null 2>&1; then
+		if _out=$(ksud insmod "$_ko" 2>&1); then
 			nm_lkm_probe && return 0
 			return 2
 		fi
+		nm_lkm_echo "$_out"
 		rmmod nomount 2>/dev/null
 	fi
 

@@ -189,7 +189,9 @@ nm_lkm_boot_load() {
     nm_set_bin
     # Count and trip before inserting kernel code: an insmod that panics never reaches a later bump.
     nm_guard_bump "engine module load" || return 0
-    NM_LKM_SAY=:
+    # Every candidate tried and the loader's own answer. With nothing logged here a module that
+    # would not load left one line, and the reason lived only in dmesg.
+    NM_LKM_SAY=nmlog
     NM_LKM_NM="$NM_BIN"
     NM_LKM_LOADER="$MODDIR/loader"
     export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
@@ -208,7 +210,13 @@ nm_lkm_boot_load() {
     nm_lkm_load_best "$MODDIR/lkm"
     _lrc=$?
     case "$_lrc" in 0|2) [ -n "$_lgid" ] && echo "$_lgid" > "$NMDIR/.lkm.boot" 2>/dev/null ;; esac
-    if [ "$_lrc" = 0 ]; then
+    if [ "$_lrc" = 0 ] && [ "${NM_LKM_SOURCE:-}" = previous ]; then
+        # The copy kept from before this update is another engine build than this zip's.
+        for _zk in "$MODDIR"/lkm/nomount-*.ko; do break; done
+        nmlog "⚠ engine module loaded from the copy kept before this update (engine $("$NM_BIN" v 2>/dev/null | head -n 1)), not this zip's ($(nm_lkm_build_of "$_zk")): none of its modules loads on $(uname -r)"
+        unset _zk
+        nm_lkm_prune "$MODDIR/lkm"
+    elif [ "$_lrc" = 0 ]; then
         nmlog "engine module loaded from ${NM_LKM_SOURCE:-?} ($(uname -r))"
         nm_lkm_prune "$MODDIR/lkm"
     elif [ "$_lrc" = 2 ]; then
@@ -218,6 +226,7 @@ nm_lkm_boot_load() {
         nmlog "⛔ this zip has no engine module for $(uname -r) - nothing will be injected this boot. Use a kernel with NoMount built in and the 00_ zip."
     elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
         nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
+        nm_lkm_kernel_reason | while IFS= read -r _l; do nmlog "  kernel: $_l"; done
     fi
     unset _lrc _lgid
 }
