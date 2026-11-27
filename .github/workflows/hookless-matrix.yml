@@ -27,11 +27,17 @@ on:
     branches: [prerelease, main]
     paths:
       - 'hookless/**'
+      - 'tests/qemu/**'
+      - 'userspace/src/nm.c'
+      - 'userspace/src/nm.h'
       - '.github/workflows/hookless-matrix.yml'
   pull_request:
     branches: [prerelease, main]
     paths:
       - 'hookless/**'
+      - 'tests/qemu/**'
+      - 'userspace/src/nm.c'
+      - 'userspace/src/nm.h'
       - '.github/workflows/hookless-matrix.yml'
   workflow_call:
     inputs:
