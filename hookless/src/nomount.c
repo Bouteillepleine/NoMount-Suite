@@ -2884,6 +2884,21 @@ static loff_t nomount_hijacked_llseek(struct file *file, loff_t offset, int when
     rcu_read_unlock();
 
     if (d && (whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
+        !(nomount_is_uid_blocked(current_uid().val) && !READ_ONCE(d->has_public)) &&
+        nm_victim_is_overlay(inode->i_sb)) {
+        struct kstat st;
+
+        /* overlayfs answers first: a merged directory refuses SEEK_END with EINVAL, as every
+         * stock one does. One passed through to a single layer answers that layer's size,
+         * and then takes the size stat gives this caller. */
+        nm_dir_node_put(d);
+        res = (orig_fop && orig_fop->llseek) ? orig_fop->llseek(file, offset, whence)
+                                             : generic_file_llseek(file, offset, whence);
+        if (res >= 0 && nm_path_stat(&file->f_path, &st) == 0)
+            res = generic_file_llseek_size(file, offset, whence, inode->i_sb->s_maxbytes, st.size);
+        return res;
+    }
+    if (d && (whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
         !(nomount_is_uid_blocked(current_uid().val) && !READ_ONCE(d->has_public))) {
         nm_dir_deltas(d, &nld, &delta);
         sized = nm_hijacked_dir_size(inode, d, i_size_read(inode), delta, &sz) != 0;
@@ -2962,6 +2977,15 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
         }
     }
 out:
+    /* A SEEK_END lock reads i_size raw, and the LKM has no fs/locks.c hook. overlayfs reads
+     * a directory's i_size nowhere (ovl_copyattr only writes it), so it can follow the size
+     * stat gave; erofs bounds its readdir by its own, which stays. */
+    if (!res && S_ISDIR(inode->i_mode) && nm_victim_is_overlay(inode->i_sb) &&
+        unlikely(i_size_read(inode) != stat->size)) {
+        spin_lock(&inode->i_lock);
+        i_size_write(inode, stat->size);
+        spin_unlock(&inode->i_lock);
+    }
     if (d) nm_dir_node_put(d);
     return res;
 }
