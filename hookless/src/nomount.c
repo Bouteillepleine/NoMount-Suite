@@ -2986,6 +2986,33 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (info->flags & NM_FLAG_VIRTUAL_DIR) return 0;
 
+    /* A caller served the stock file changes the stock file: on a writable victim its
+     * chmod or truncate landed on the module copy everyone else is served. */
+    {
+        struct path *stock = nm_stock_for_caller(info);
+
+        if (unlikely(stock)) {
+            struct iattr sattr = *attr;
+            struct inode *si = d_backing_inode(stock->dentry);
+
+            sattr.ia_valid &= ~ATTR_FILE;
+            sattr.ia_file = NULL;
+            err = mnt_want_write(stock->mnt);
+            if (unlikely(err))
+                return err;
+            inode_lock_nested(si, I_MUTEX_NONDIR2);
+            err = notify_change(IDMAP_CALL stock->dentry, &sattr, NULL);
+            inode_unlock(si);
+            mnt_drop_write(stock->mnt);
+            if (!err && (info->flags & NM_FLAG_HAVE_VOWN)) {
+                if (attr->ia_valid & ATTR_MODE) info->v_mode = si->i_mode & 07777;
+                if (attr->ia_valid & ATTR_UID) info->v_uid = si->i_uid;
+                if (attr->ia_valid & ATTR_GID) info->v_gid = si->i_gid;
+            }
+            return err;
+        }
+    }
+
     {
         struct iattr battr = *attr;
 
