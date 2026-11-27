@@ -284,27 +284,72 @@ fn package_names_in(blob: &[u8]) -> Vec<String> {
 /// but no root) from itself: `getpriority(PRIO_USER, getuid())` answered ESRCH, which stock
 /// cannot. The kernel is asked per installed app; the records are a fallback.
 fn root_granted_packages() -> Vec<String> {
-    if let Some(installed) = crate::blocklist::installed_packages() {
-        let mut out = Vec::new();
-        let mut answered = false;
-        for (pkg, uid) in &installed {
-            match crate::ksu::uid_granted_root(*uid) {
-                Some(granted) => {
-                    answered = true;
-                    if granted {
-                        out.push(pkg.clone());
-                    }
-                }
-                None => break,
-            }
-        }
-        if answered {
-            return out;
-        }
-    }
-    match std::fs::read(KSU_ALLOWLIST) {
+    let records = || match std::fs::read(KSU_ALLOWLIST) {
         Ok(b) => root_records_in(&b),
         Err(_) => Vec::new(),
+    };
+    let Some(installed) = crate::blocklist::installed_packages() else { return records() };
+    match granted_by_kernel(&installed, &device_user_ids(), crate::ksu::uid_granted_root) {
+        Asked::All(out) => out,
+        // The kernel stopped answering partway: what it said, plus the records for the rest.
+        Asked::Some(mut out) => {
+            for p in records() {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            out
+        }
+        Asked::None => records(),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Asked {
+    All(Vec<String>),
+    Some(Vec<String>),
+    None,
+}
+
+/// KernelSU keys a grant by the full uid, and packages.list names user 0's: a clone or a
+/// work-profile copy granted root on its own was never asked about.
+fn granted_by_kernel(
+    installed: &[(String, u32)],
+    users: &[u32],
+    ask: impl Fn(u32) -> Option<bool>,
+) -> Asked {
+    let mut out = Vec::new();
+    let mut answered = false;
+    for (pkg, uid) in installed {
+        let appid = crate::blocklist::appid(*uid);
+        let mut granted = false;
+        for u in users {
+            let Some(raw) = u
+                .checked_mul(crate::blocklist::PER_USER_RANGE)
+                .and_then(|b| b.checked_add(appid))
+            else {
+                continue;
+            };
+            match ask(raw) {
+                Some(g) => {
+                    answered = true;
+                    if g {
+                        granted = true;
+                        break;
+                    }
+                }
+                None if answered => return Asked::Some(out),
+                None => return Asked::None,
+            }
+        }
+        if granted {
+            out.push(pkg.clone());
+        }
+    }
+    if answered {
+        Asked::All(out)
+    } else {
+        Asked::None
     }
 }
 
@@ -373,7 +418,8 @@ fn conceal_uids() -> Option<Vec<u32>> {
     // appid holds manager status instead; KSUN, SukiSU and ReSukiSU all answer ('K', 10).
     // Only an app appid: KernelSU answers a "no manager" sentinel otherwise (-1, 65535).
     let manager = crate::ksu::manager_appid().filter(|a| (10_000..20_000).contains(a));
-    if entries.is_empty() && root_granted_packages().is_empty() {
+    let granted = root_granted_packages();
+    if entries.is_empty() && granted.is_empty() {
         return Some(match manager {
             Some(a) => expand_ghost_uids(&[a], &device_user_ids()),
             None => Vec::new(),
@@ -383,7 +429,7 @@ fn conceal_uids() -> Option<Vec<u32>> {
     // would flush the kernel's conceal table and quietly turn getpriority concealment off.
     let installed = crate::blocklist::installed_packages()?;
     let mut entries = entries;
-    for p in root_granted_packages() {
+    for p in granted {
         if !entries.contains(&p) {
             entries.push(p);
         }
@@ -858,6 +904,29 @@ mod tests {
         assert!(stale_conceal_entries(&[], &installed).is_empty());
     }
     use super::*;
+
+    #[test]
+    fn a_root_grant_is_asked_per_user_and_a_failure_midway_is_not_complete() {
+        let installed = vec![
+            ("com.a".to_string(), 10100),
+            ("com.clone".to_string(), 10200),
+            ("com.b".to_string(), 10300),
+        ];
+        let users = [0, 10];
+        // Only the user-10 copy of com.clone is granted.
+        let ask = |uid: u32| Some(uid == 10100 || uid == 1_010_200);
+        assert_eq!(
+            granted_by_kernel(&installed, &users, ask),
+            Asked::All(vec!["com.a".to_string(), "com.clone".to_string()])
+        );
+        let fails_at_b = |uid: u32| if uid == 10300 { None } else { Some(uid == 10100) };
+        assert_eq!(
+            granted_by_kernel(&installed, &users, fails_at_b),
+            Asked::Some(vec!["com.a".to_string()]),
+            "a partial answer must not read as the whole list"
+        );
+        assert_eq!(granted_by_kernel(&installed, &users, |_| None), Asked::None);
+    }
 
     #[test]
     fn an_unreadable_cloak_list_is_not_an_empty_one() {
