@@ -262,8 +262,10 @@ jobs:
           # `s->module = exp->module;`, which leaves every CRC out. 5.10 and 5.15 carry modpost's
           # flags (-m among them) in MODPOST itself, so overriding MODPOST drops them. 6.3+
           # records the commands as savedcmd_. An unpatched image keeps its own.
+          # Under set -eu a missing .cmd file ended the step with rc 2 and no line.
+          [ -f "$KDIR/scripts/mod/.modpost.o.cmd" ] || echo "modpost: no .modpost.o.cmd in $KDIR, keeping the image's"
           mp_cmd_src=$(sed -n 's|^[a-z]*cmd_scripts/mod/modpost\.o := .* \([^ ]*/scripts/mod/modpost\.c\)$|\1|p' \
-                       "$KDIR/scripts/mod/.modpost.o.cmd" 2>/dev/null)
+                       "$KDIR/scripts/mod/.modpost.o.cmd" 2>/dev/null || true)
           case "$mp_cmd_src" in /*|'') mp_src=$mp_cmd_src ;; *) mp_src="$KDIR/$mp_cmd_src" ;; esac
           if [ "${{ matrix.versions }}" = empty ]; then
             echo "versions=empty for ${{ matrix.kmi }}: the image's own modpost, so __versions ships empty"
@@ -281,6 +283,8 @@ jobs:
             (cd "$KDIR" && eval "$mp_cc" && eval "$mp_ld")
             install -m755 "$mp_out/modpost" "$KDIR/scripts/mod/modpost"
             echo "modpost rebuilt from $mp_src with check_exports() restored"
+          else
+            echo "modpost: not rebuilt (source ${mp_src:-not named in .modpost.o.cmd}; no commented-out check_exports there), keeping the image's"
           fi
           # The image's own kernel source, for overlayfs/ovl_entry.h (lkm/Makefile, NM_OVL_SRC).
           ovl_src=/opt/ddk/src/${{ matrix.kmi }}/fs
@@ -336,6 +340,17 @@ jobs:
             else
               [ "$vlen" -ge 128 ] || {
                 echo "::error::$KO has $((vlen / 64)) CRC entries on a MODVERSIONS kernel"; exit 1; }
+              # One CRC per import, or modpost left some out ("has no CRC") and the kernel
+              # checks only part of what the module binds. With 6.11+'s extended modversions
+              # __version_ext_crcs carries every import and __versions the short names.
+              for _nm in llvm-nm nm; do command -v "$_nm" >/dev/null 2>&1 && break; done
+              u=$("$_nm" -u "$KO" | wc -l)
+              xrow=$("$_re" -SW "$KO" \
+                     | awk '{for (i = 1; i <= NF; i++) if ($i == "__version_ext_crcs") { print $(i + 4); exit }}')
+              xlen=$(printf '%d' "0x${xrow:-0}" 2>/dev/null || echo 0)
+              ncrc=$((vlen / 64 > xlen / 4 ? vlen / 64 : xlen / 4))
+              [ "$u" -gt 0 ] && [ "$ncrc" -ge "$u" ] || {
+                echo "::error::$KO carries $ncrc CRCs for $u imports: modpost left some out"; exit 1; }
               dd if="$KO" of=/tmp/versions.bin bs=1 skip="$voff" count="$vlen" 2>/dev/null
               off=$(grep -obUa 'module_layout' /tmp/versions.bin | cut -d: -f1 | while read -r o; do
                       [ $((o % 64)) -eq 8 ] && { echo "$o"; break; }; done)
@@ -348,9 +363,12 @@ jobs:
                 fi
                 echo "::warning::${{ matrix.kmi }} held back: module_layout $crc, KMI ${{ matrix.layout }}"
               else
-                echo "__versions: $((vlen / 64)) CRC entries, module_layout $crc = KMI"
+                echo "__versions: $((vlen / 64)) CRC entries for $u imports, module_layout $crc = KMI"
               fi
             fi
+          else
+            echo "::error::no CONFIG_MODVERSIONS=y in $KDIR/.config or auto.conf: every GKI KMI sets it, so the probe broke"
+            exit 1
           fi
           ls -l "out/nomount-${{ matrix.kmi }}.ko"
 
