@@ -349,8 +349,9 @@ jobs:
                      | awk '{for (i = 1; i <= NF; i++) if ($i == "__version_ext_crcs") { print $(i + 4); exit }}')
               xlen=$(printf '%d' "0x${xrow:-0}" 2>/dev/null || echo 0)
               ncrc=$((vlen / 64 > xlen / 4 ? vlen / 64 : xlen / 4))
-              [ "$u" -gt 0 ] && [ "$ncrc" -ge "$u" ] || {
-                echo "::error::$KO carries $ncrc CRCs for $u imports: modpost left some out"; exit 1; }
+              if [ "$u" -eq 0 ] || [ "$ncrc" -lt "$u" ]; then
+                echo "::error::$KO carries $ncrc CRCs for $u imports: modpost left some out"; exit 1
+              fi
               dd if="$KO" of=/tmp/versions.bin bs=1 skip="$voff" count="$vlen" 2>/dev/null
               off=$(grep -obUa 'module_layout' /tmp/versions.bin | cut -d: -f1 | while read -r o; do
                       [ $((o % 64)) -eq 8 ] && { echo "$o"; break; }; done)
@@ -685,9 +686,11 @@ jobs:
         run: |
           set -eu
           set -- dist/01_NoMount-Module-LKM-*.zip
-          [ "$#" = 1 ] && [ -f "$1" ] || { echo "::error::want one 01_ release zip in dist/, found: $*"; exit 1; }
+          if [ "$#" != 1 ] || [ ! -f "$1" ]; then
+            echo "::error::want one 01_ release zip in dist/, found: $*"; exit 1
+          fi
           Z="$RUNNER_TEMP/z"; mkdir -p "$Z"
-          unzip -q "$1" 'lkm/*' loader bin/arm64-v8a/nm -d "$Z"
+          unzip -qo "$1" 'lkm/*' loader bin/arm64-v8a/nm -d "$Z"
           for f in "lkm/nomount-$KMI.ko" loader bin/arm64-v8a/nm; do
             [ -s "$Z/$f" ] || { echo "::error::$1 has no $f"; exit 1; }
           done
