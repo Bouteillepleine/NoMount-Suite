@@ -7,6 +7,7 @@ NMLOG_TAG=service
     exit 1
 }
 nm_set_bin
+rm -f "$NMDIR/.card.done" 2>/dev/null
 
 _now=$(date +%s 2>/dev/null || echo 0)
 _up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
@@ -129,6 +130,129 @@ if [ "$_armed" = 0 ] && [ ! -e "$NMDIR/disabled" ]; then
     nmlog "⛔ the bootloop guard did not arm this boot - the post-boot reload, absorb, whiteouts, hide list and ghost sync are skipped too, so nothing is injected without a counter to stop a panic loop"
 fi
 
+# The manager's module card. Called again by the late subshell once its passes have run:
+# the first card was taken before they changed the rule table, and a failed first reload left
+# "late module content may not be served" up for the whole boot. $1 labels the log line.
+nm_svc_card() {
+    if [ -e "$NMDIR/disabled" ]; then
+        nm_card "⛔ disabled - bootloop guard tripped, see the WebUI" \
+            || nmlog "⚠ could not write the module description card (manager slow or refused)"
+    elif [ -x "$BIN" ]; then
+        nm_rule_counts
+        _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
+        _sum_get() {
+            printf '%s' "$2" | sed -n 's/.*"summary":{\([^}]*\)}.*/\1/p' \
+                | tr ',' '\n' | sed -n "s/^\"$1\"://p" | head -1
+        }
+        _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
+        # init restarts adbd while the USB gadget settles, and /dev/socket/adbd is the ghost
+        # sample's only path no rule covers: a pass in that gap has nothing to test. Re-ask.
+        _try=0
+        while [ "$_try" -lt 3 ]; do
+            case "$(_sum_get unmeasured "$_doc")" in ''|*[!0-9]*|0) break ;; esac
+            _try=$((_try + 1))
+            sleep 10
+            _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
+        done
+        _err=$(_sum_get fail "$_doc")
+        _wrn=$(_sum_get warn "$_doc")
+        _unm=$(_sum_get unmeasured "$_doc")
+        if [ "$_try" -gt 0 ]; then
+            case "$_unm" in '') _say="no answer" ;; *) _say="$_unm unmeasured" ;; esac
+            nmlog "card: plan check had an unmeasured row, re-asked $_try time(s), now $_say"
+        fi
+        unset _try _say
+        case "$_unm" in ''|*[!0-9]*) _unm=0 ;; esac
+        case "$_err$_wrn" in
+            ''|*[!0-9]*) _docok=0; _err=0; _wrn=0 ;;
+            *) _docok=1 ;;
+        esac
+        unset _doc
+        _health_fresh && _hfresh=1 || _hfresh=0
+        # A checkwatch run (the WebUI) can have written a fresh health.txt since _hv was read.
+        [ "$_hfresh" = 1 ] && _hv=$(_health_get verdict)
+        _cons=$(_health_get consistency)
+        case "$_cons" in
+            ok|ok:*|unchecked*|"") _consbad=0 ;;
+            *) _consbad=1 ;;
+        esac
+        if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then
+            _health="⛔ mount pass never ran - see the WebUI"
+        elif [ "$(_health_get engine)" = "down" ] && nm_lkm_zip; then
+            _health="⛔ engine module did not load on this kernel - see the WebUI"
+        elif [ "$(_health_get engine)" = "down" ]; then
+            _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
+        elif [ "${_rl_rc:-0}" -ne 0 ]; then
+            _health="ℹ️ late module content may not be served - tap Reload in the WebUI"
+        elif [ "$_consbad" = 1 ]; then
+            _health="ℹ️ per-UID inconsistency - see the WebUI"
+        elif [ "${_err:-0}" -gt 0 ]; then
+            _health="ℹ️ $_err finding(s) - see the WebUI"
+        elif [ -n "$_hv" ] && [ "$_hv" != "clean" ]; then
+            _health="ℹ️ $_hv - see the WebUI"
+        elif [ "${_wrn:-0}" -gt 0 ]; then
+            _health="ℹ️ $_wrn finding(s) - see the WebUI"
+        elif [ "${_unm:-0}" -gt 0 ]; then
+            _health="not fully measured - see the WebUI"
+        elif [ "${_nmlrc:-0}" -ne 0 ]; then
+            _health="serving, rule count unreadable"
+        elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
+            _health="healthy"
+        elif [ "${_docok:-0}" = 1 ]; then
+            _health="health unknown (no record)"
+        else
+            _health="health unknown (check incomplete)"
+        fi
+        _fgn=$(_health_get mounts_foreign)
+        case "$_fgn" in
+            ''|*[!0-9]*)
+                _fgn=""
+                ;;
+        esac
+        if [ -z "$_fgn" ]; then
+            if [ "${_mnt:-0}" -gt 0 ]; then
+                _mstate="$_mnt mount(s), origin unknown"
+            else
+                _mstate="0 mounts"
+            fi
+        elif [ "$_fgn" -gt 0 ]; then
+            _mstate="ℹ $_fgn foreign mount(s)"
+        elif [ "${_mnt:-0}" -gt 0 ]; then
+            _mstate="$_mnt mount by design"
+        else
+            _mstate="0 mounts"
+        fi
+        _mu=$(_health_get manager_umount | head -1)
+        if [ "$_mu" = "on" ]; then
+            # shellcheck disable=SC1111  # typographic quotes on purpose: this names
+            if [ "${_mnt:-0}" -gt 0 ]; then
+                _muc=" · “kernel umount” ON (hides our $_mnt bind(s))"
+                _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"
+            else
+                _muc=" · “kernel umount” ON (nothing to unmount)"
+                _mul=", manager kernel_umount is ON (nothing here to unmount)"
+            fi
+        else
+            _muc=""
+            _mul=""
+        fi
+        if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
+        elif [ "$_health" = healthy ] && [ "${_nmlrc:-0}" -eq 0 ] && [ "${_rules:-0}" -gt 0 ] 2>/dev/null; then _mark="✅"
+        else _mark="ℹ️"; _health=${_health#ℹ️ }; fi
+        [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
+        if [ "${_nmlrc:-0}" -ne 0 ]; then
+            _rphr="rule count unavailable"
+        else
+            _rphr="$_rules rules · $_rro RRO$_wof"
+        fi
+        if nm_card "$_mark $_rphr · $_mstate - $_health$_muc"; then
+            nmlog "card refreshed${1:+ $1} ($_rphr, $_mstate, $_health$_mul)"
+        else
+            nmlog "⚠ could not write the module description card (manager slow or refused)"
+        fi
+    fi
+}
+
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && [ "$_hookran" = 1 ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
@@ -190,6 +314,15 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && [ "$_hook
             nmlog "late absorb pass: $_ab2"
         fi
         _late_reset
+        # After the foreground's card, so this one, from the late reload's answer, is the one
+        # left standing.
+        _cw=0
+        while [ ! -e "$NMDIR/.card.done" ] && [ "$_cw" -lt 450 ]; do
+            sleep 2
+            _cw=$((_cw + 1))
+        done
+        _rl_rc=$_rl2_rc
+        nm_svc_card "after the late passes"
     ) &
     _late_owns_reset=1
 fi
@@ -402,121 +535,6 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     unset _arc
 fi
 
-if [ -e "$NMDIR/disabled" ]; then
-    nm_card "⛔ disabled - bootloop guard tripped, see the WebUI" \
-        || nmlog "⚠ could not write the module description card (manager slow or refused)"
-elif [ -x "$BIN" ]; then
-    nm_rule_counts
-    _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
-    _sum_get() {
-        printf '%s' "$2" | sed -n 's/.*"summary":{\([^}]*\)}.*/\1/p' \
-            | tr ',' '\n' | sed -n "s/^\"$1\"://p" | head -1
-    }
-    _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
-    # init restarts adbd while the USB gadget settles, and /dev/socket/adbd is the ghost
-    # sample's only path no rule covers: a pass in that gap has nothing to test. Re-ask.
-    _try=0
-    while [ "$_try" -lt 3 ]; do
-        case "$(_sum_get unmeasured "$_doc")" in ''|*[!0-9]*|0) break ;; esac
-        _try=$((_try + 1))
-        sleep 10
-        _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
-    done
-    _err=$(_sum_get fail "$_doc")
-    _wrn=$(_sum_get warn "$_doc")
-    _unm=$(_sum_get unmeasured "$_doc")
-    if [ "$_try" -gt 0 ]; then
-        case "$_unm" in '') _say="no answer" ;; *) _say="$_unm unmeasured" ;; esac
-        nmlog "card: plan check had an unmeasured row, re-asked $_try time(s), now $_say"
-    fi
-    unset _try _say
-    case "$_unm" in ''|*[!0-9]*) _unm=0 ;; esac
-    case "$_err$_wrn" in
-        ''|*[!0-9]*) _docok=0; _err=0; _wrn=0 ;;
-        *) _docok=1 ;;
-    esac
-    unset _doc
-    _health_fresh && _hfresh=1 || _hfresh=0
-    # A checkwatch run (the WebUI) can have written a fresh health.txt since _hv was read.
-    [ "$_hfresh" = 1 ] && _hv=$(_health_get verdict)
-    _cons=$(_health_get consistency)
-    case "$_cons" in
-        ok|ok:*|unchecked*|"") _consbad=0 ;;
-        *) _consbad=1 ;;
-    esac
-    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then
-        _health="⛔ mount pass never ran - see the WebUI"
-    elif [ "$(_health_get engine)" = "down" ] && nm_lkm_zip; then
-        _health="⛔ engine module did not load on this kernel - see the WebUI"
-    elif [ "$(_health_get engine)" = "down" ]; then
-        _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
-    elif [ "${_rl_rc:-0}" -ne 0 ]; then
-        _health="ℹ️ late module content may not be served - tap Reload in the WebUI"
-    elif [ "$_consbad" = 1 ]; then
-        _health="ℹ️ per-UID inconsistency - see the WebUI"
-    elif [ "${_err:-0}" -gt 0 ]; then
-        _health="ℹ️ $_err finding(s) - see the WebUI"
-    elif [ -n "$_hv" ] && [ "$_hv" != "clean" ]; then
-        _health="ℹ️ $_hv - see the WebUI"
-    elif [ "${_wrn:-0}" -gt 0 ]; then
-        _health="ℹ️ $_wrn finding(s) - see the WebUI"
-    elif [ "${_unm:-0}" -gt 0 ]; then
-        _health="not fully measured - see the WebUI"
-    elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _health="serving, rule count unreadable"
-    elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
-        _health="healthy"
-    elif [ "${_docok:-0}" = 1 ]; then
-        _health="health unknown (no record)"
-    else
-        _health="health unknown (check incomplete)"
-    fi
-    _fgn=$(_health_get mounts_foreign)
-    case "$_fgn" in
-        ''|*[!0-9]*)
-            _fgn=""
-            ;;
-    esac
-    if [ -z "$_fgn" ]; then
-        if [ "${_mnt:-0}" -gt 0 ]; then
-            _mstate="$_mnt mount(s), origin unknown"
-        else
-            _mstate="0 mounts"
-        fi
-    elif [ "$_fgn" -gt 0 ]; then
-        _mstate="ℹ $_fgn foreign mount(s)"
-    elif [ "${_mnt:-0}" -gt 0 ]; then
-        _mstate="$_mnt mount by design"
-    else
-        _mstate="0 mounts"
-    fi
-    _mu=$(_health_get manager_umount | head -1)
-    if [ "$_mu" = "on" ]; then
-        # shellcheck disable=SC1111  # typographic quotes on purpose: this names
-        if [ "${_mnt:-0}" -gt 0 ]; then
-            _muc=" · “kernel umount” ON (hides our $_mnt bind(s))"
-            _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"
-        else
-            _muc=" · “kernel umount” ON (nothing to unmount)"
-            _mul=", manager kernel_umount is ON (nothing here to unmount)"
-        fi
-    else
-        _muc=""
-        _mul=""
-    fi
-    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
-    elif [ "$_health" = healthy ] && [ "${_nmlrc:-0}" -eq 0 ] && [ "${_rules:-0}" -gt 0 ] 2>/dev/null; then _mark="✅"
-    else _mark="ℹ️"; _health=${_health#ℹ️ }; fi
-    [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
-    if [ "${_nmlrc:-0}" -ne 0 ]; then
-        _rphr="rule count unavailable"
-    else
-        _rphr="$_rules rules · $_rro RRO$_wof"
-    fi
-    if nm_card "$_mark $_rphr · $_mstate - $_health$_muc"; then
-        nmlog "card refreshed ($_rphr, $_mstate, $_health$_mul)"
-    else
-        nmlog "⚠ could not write the module description card (manager slow or refused)"
-    fi
-fi
+nm_svc_card
+: > "$NMDIR/.card.done" 2>/dev/null
 exit 0
