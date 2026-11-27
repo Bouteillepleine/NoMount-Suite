@@ -369,6 +369,49 @@ mk "$WORK/dev/nomount.ko.prev"; rm -rf "$WORK/lkm"
 nm_lkm_load_best "$WORK/lkm" >/dev/null
 check "the set-aside copy is reachable with no lkm/ at all" "$NM_LKM_SOURCE" "previous"
 
+prevstrict() { echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko.prev=' | head -1; }
+# A copy kept from the guessed-KMI loop is set aside with its marker, and loads strict.
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.69-android16-6-gdevice-4k\nkmi=android16-6.12\nstrict=1\n' > "$WORK/dev/nomount.ko.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_retire_kept
+check "the set-aside copy keeps its marker" "$(sed -n 's/^strict=//p' "$WORK/dev/nomount.ko.prev.bundled" 2>/dev/null)" "1"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a guessed-KMI copy from before the update loads strict" "$(prevstrict)" "nomount.ko.prev=strict"
+nm_lkm_prune "$WORK/lkm"
+check "  and the newer bundled set survives the prune" \
+	"$([ -f "$WORK/lkm/nomount-android16-6.12.ko" ] && echo kept || echo gone)" "kept"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko.prev"; rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "an unmarked copy from before the update loads strict" "$(prevstrict)" "nomount.ko.prev=strict"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.69-android16-6-gdevice-4k\nkmi=android16-6.12\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+nm_lkm_retire_kept; rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "an exact pick for this kernel loads as it did" "$(prevstrict)" "nomount.ko.prev=no"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nkmi=android16-6.12\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+nm_lkm_retire_kept; rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "  and after an OTA on the same KMI" "$(prevstrict)" "nomount.ko.prev=no"
+
+setup "nomount.ko.prev"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nkmi=android15-6.12\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+nm_lkm_retire_kept; rm -rf "$WORK/lkm"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "an exact pick for another KMI loads strict" "$(prevstrict)" "nomount.ko.prev=strict"
+
+setup "nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko.prev"; printf 'strict=1\n' > "$WORK/dev/nomount.ko.prev.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a newer pick drops the set-aside copy's marker with it" \
+	"$([ -f "$WORK/dev/nomount.ko.prev.bundled" ] && echo left || echo dropped)" "dropped"
+
 setup ""
 mkko "$WORK/dev/nomount.ko" "6.12.52-4k"
 nm_lkm_retire_kept

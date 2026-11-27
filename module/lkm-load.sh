@@ -126,7 +126,7 @@ nm_lkm_keep() {
 			# be the first candidate tried without the strict checks.
 			printf 'kver=%s\nkmi=%s\nstrict=%s\n' "$(uname -r)" "$(nm_lkm_kmi)" \
 				"$([ "$_kstrict" = strict ] && echo 1 || echo 0)" > "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
-			rm -f "$NM_LKM_DEVICE_KO.prev" 2>/dev/null
+			rm -f "$NM_LKM_DEVICE_KO.prev" "$NM_LKM_DEVICE_KO.prev.bundled" 2>/dev/null
 			$NM_LKM_SAY "  kept it at $NM_LKM_DEVICE_KO so an update cannot remove it"
 			return 0
 		fi
@@ -147,6 +147,10 @@ nm_lkm_retire_kept() {
 		[ -n "$_vm" ] && [ "$_vm" != "$(uname -r)" ] || return 0
 	fi
 	mv -f "$NM_LKM_DEVICE_KO" "$NM_LKM_DEVICE_KO.prev" 2>/dev/null || return 0
+	# The marker goes with it: what it was picked for decides whether it may load non-strict.
+	rm -f "$NM_LKM_DEVICE_KO.prev.bundled" 2>/dev/null
+	[ -f "$NM_LKM_DEVICE_KO.bundled" ] &&
+		mv -f "$NM_LKM_DEVICE_KO.bundled" "$NM_LKM_DEVICE_KO.prev.bundled" 2>/dev/null
 	rm -f "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
 	$NM_LKM_SAY "  set the engine module kept by the previous install aside; this one's loads first"
 }
@@ -261,17 +265,29 @@ nm_lkm_try_kept_stale() {
 	[ "$_rc" = 0 ]
 }
 
+# Strict unless its marker says it was an exact pick for this kernel or its KMI: a .prev
+# picked by guessing, or of unknown origin, gets the CRC checks the fallback loop gets.
 nm_lkm_try_prev() {
 	[ -f "$NM_LKM_DEVICE_KO.prev" ] || return 1
-	$NM_LKM_SAY "  trying the module kept before this update (nothing newer loads)"
-	nm_lkm_insert "$NM_LKM_DEVICE_KO.prev"; _rc=$?
+	_pstrict=strict
+	_pm="$NM_LKM_DEVICE_KO.prev.bundled"
+	if [ -f "$_pm" ] && [ "$(sed -n 's/^strict=//p' "$_pm" 2>/dev/null)" = 0 ]; then
+		_pk=$(sed -n 's/^kver=//p' "$_pm" 2>/dev/null)
+		_pkmi=$(sed -n 's/^kmi=//p' "$_pm" 2>/dev/null)
+		if [ "$_pk" = "$(uname -r)" ] || { [ -n "$_pkmi" ] && [ "$_pkmi" = "$(nm_lkm_kmi)" ]; }; then
+			_pstrict=""
+		fi
+	fi
+	$NM_LKM_SAY "  trying the module kept before this update (nothing newer loads${_pstrict:+; strict})"
+	nm_lkm_insert "$NM_LKM_DEVICE_KO.prev" $_pstrict; _rc=$?
 	[ "$_rc" != 1 ] && NM_LKM_SOURCE=previous
 	return "$_rc"
 }
 
 nm_lkm_prune() {
 	# Keep the bundled set when the kernel supplied the module: it is the only
-	# fallback left if that file is gone after the next kernel.
-	[ "$NM_LKM_SOURCE" = device ] && return 0
+	# fallback left if that file is gone after the next kernel. And after a load of
+	# the copy from before an update: the newer set is what the next kernel tries first.
+	case "$NM_LKM_SOURCE" in device|previous) return 0 ;; esac
 	rm -f "$1"/nomount-*.ko 2>/dev/null
 }
