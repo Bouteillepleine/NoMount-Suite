@@ -3627,11 +3627,10 @@ static bool nm_reval_info_agrees(struct dentry *dentry, const struct nm_rule_inf
            nm_scope_copy_eq(&info->v_scope, &ri->v_scope);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
-static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
-#else
-static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
-#endif
+/* The ref-walk arm, out of line: its 520-byte rule_info frame is zeroed on entry under
+ * CONFIG_INIT_STACK_ALL_ZERO, and every RCU-walk lookup used to pay that memset. */
+static noinline int nm_d_revalidate_ref(struct inode *dir, const struct qstr *name,
+                                        struct dentry *dentry, unsigned int flags)
 {
     struct inode *parent_dir;
     struct nm_iop *nm_iop;
@@ -3641,34 +3640,6 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     unsigned int dlen;
     u32 hash, gen;
     bool injected;
-
-    if (flags & LOOKUP_RCU) {
-        struct inode *ino = d_inode_rcu(dentry);
-        struct nm_inode_info *rinfo;
-
-        if (!ino || (ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops))
-            return -ECHILD;
-        rinfo = READ_ONCE(ino->i_private);
-        if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
-            return -ECHILD;
-        if ((rinfo->flags & NM_FLAG_STOCK_ONLY) && nm_info_served(rinfo))
-            return -ECHILD;
-        /* Decided per caller from the scope the inode carries, never by invalidating
-         * the dentry: that would unhash it for every process, and every mapping of it
-         * would then read "(deleted)". An added name is absent for an unserved caller,
-         * and a negative return other than 0 fails its lookup without touching the
-         * dentry. A replaced one is served stock by the inode's ops. */
-        if (!(rinfo->flags & NM_FLAG_STOCK_ONLY) && !nm_info_served(rinfo)) {
-            if (!(rinfo->flags & NM_FLAG_SHADOWS_STOCK))
-                return nm_absent_errno(ino, flags);
-            /* Not shareable: as before this change, a hide-list caller keeps it where there
-             * is a stock file to serve, and anyone else re-walks. */
-            if (!nm_shareable_stock(ino->i_mode, &rinfo->s_path, ino->i_sb, rinfo->flags) &&
-                !(nm_uid_hidden(rinfo->flags) && READ_ONCE(rinfo->s_path.dentry)))
-                return -ECHILD;
-        }
-        return 1;
-    }
 
     gen = (u32)atomic_read_acquire(&nm_rule_gen);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
@@ -3787,6 +3758,58 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return nm_reval_fresh(dentry, gen);
     }
     return nm_reval_stale(dentry);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
+#else
+static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
+#endif
+{
+    if (flags & LOOKUP_RCU) {
+        struct inode *ino = d_inode_rcu(dentry);
+        struct nm_inode_info *rinfo;
+
+        if (!ino || (ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops))
+            return -ECHILD;
+        rinfo = READ_ONCE(ino->i_private);
+        if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
+            return -ECHILD;
+        if ((rinfo->flags & NM_FLAG_STOCK_ONLY) && nm_info_served(rinfo))
+            return -ECHILD;
+        /* Decided per caller from the scope the inode carries, never by invalidating
+         * the dentry: that would unhash it for every process, and every mapping of it
+         * would then read "(deleted)". An added name is absent for an unserved caller,
+         * and a negative return other than 0 fails its lookup without touching the
+         * dentry. A replaced one is served stock by the inode's ops. */
+        if (!(rinfo->flags & NM_FLAG_STOCK_ONLY) && !nm_info_served(rinfo)) {
+            if (!(rinfo->flags & NM_FLAG_SHADOWS_STOCK)) {
+#ifdef LOOKUP_CACHED
+                /* RESOLVE_CACHED cannot leave RCU-walk, so a refusal here reads EAGAIN where
+                 * a missing name reads ENOENT (engine-oracles-10). For the last component of
+                 * an open, nm_inode_permission() refuses with ENOENT after the walk instead.
+                 * Not a symlink (its link body would need ref-walk), not a file named with a
+                 * trailing slash (that reads ENOTDIR). A write-open still differs: EROFS or
+                 * EISDIR come before the permission hook. */
+                if ((flags & (LOOKUP_CACHED | LOOKUP_OPEN)) == (LOOKUP_CACHED | LOOKUP_OPEN) &&
+                    !S_ISLNK(ino->i_mode) && (S_ISDIR(ino->i_mode) || !(flags & LOOKUP_DIRECTORY)))
+                    return 1;
+#endif
+                return nm_absent_errno(ino, flags);
+            }
+            /* Not shareable: as before this change, a hide-list caller keeps it where there
+             * is a stock file to serve, and anyone else re-walks. */
+            if (!nm_shareable_stock(ino->i_mode, &rinfo->s_path, ino->i_sb, rinfo->flags) &&
+                !(nm_uid_hidden(rinfo->flags) && READ_ONCE(rinfo->s_path.dentry)))
+                return -ECHILD;
+        }
+        return 1;
+    }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+    return nm_d_revalidate_ref(dir, name, dentry, flags);
+#else
+    return nm_d_revalidate_ref(NULL, NULL, dentry, flags);
+#endif
 }
 
 #ifdef FOP_DONTCACHE
