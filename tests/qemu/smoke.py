@@ -30,12 +30,11 @@ COMMON = [
     "injected_bytes_ext4",
     "seek_end_erofs",
     "hidden_stock_bytes", "hidden_stat_stock", "hidden_no_injected", "lock_eof_hidden",
-    "fioqsize_hidden", "hidden_unblock",
+    "fioqsize_hidden", "fionread_hidden", "hidden_unblock",
     "del_restores", "clear_restores_listing",
 ]
 EXPECTED = {
-    # FIONREAD has a hook only in the built-in engine (lkm/README.md, cost 4).
-    "builtin": COMMON + ["fionread_hidden"],
+    "builtin": COMMON,
     "lkm": ["module_loaded"] + COMMON,
 }
 

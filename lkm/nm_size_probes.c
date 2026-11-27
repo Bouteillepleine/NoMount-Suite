@@ -1,6 +1,6 @@
-/* Two readers of an engine inode's raw size the in-tree build patches and this module cannot:
- * a byte-range lock from the end of a file (fs/locks.c, l_whence = SEEK_END reads i_size)
- * and FIOQSIZE (fs/ioctl.c, inode_get_bytes()). An engine inode is shared by callers served
+/* Three readers of an engine inode's raw size the in-tree build patches and this module cannot:
+ * a byte-range lock from the end of a file (fs/locks.c, l_whence = SEEK_END reads i_size),
+ * FIOQSIZE (fs/ioctl.c, inode_get_bytes()) and FIONREAD (fs/ioctl.c, i_size - f_pos). An engine inode is shared by callers served
  * different files, so both answered the module copy's size to a caller served the stock one:
  * hosts was 56 bytes by stat and 2,033,224 by F_GETLK.
  *
@@ -13,6 +13,12 @@
  * hands the struct back unchanged when nothing conflicts, and stock leaves l_whence = SEEK_END
  * and the caller's l_start there, so its return handler puts those back; a conflict has been
  * written over them in SEEK_SET form, as stock writes it. F_SETLK copies nothing back.
+ *
+ * FIONREAD on a regular file is answered inline in do_vfs_ioctl(), which is inlined into the
+ * ioctl syscall itself on the GKI builds measured, so the probe sits on the syscall: its entry
+ * declines every command but FIONREAD (no return handler is armed for them), and its return
+ * handler, in task context, rewrites the int the kernel just wrote to user memory with the
+ * size of the file the caller is served.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -21,6 +27,9 @@
 #include <linux/fcntl.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
+#include <linux/file.h>
+#include <linux/uaccess.h>
+#include <asm/ioctls.h>
 
 #include "nm_hide.h"
 #include "nm_size_probes.h"
@@ -36,6 +45,11 @@ struct nm_sp_lock_ctx {
 struct nm_sp_bytes_ctx {
 	bool set;
 	loff_t bytes;
+};
+
+struct nm_sp_fionread_ctx {
+	unsigned int fd;
+	int __user *uptr;
 };
 
 /* The struct flock do_fcntl() and the compat path copy in is a local: anything else means
@@ -113,6 +127,42 @@ static int nm_sp_bytes_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* __arm64_sys_ioctl(const struct pt_regs *regs) and its compat twin: the syscall's own
+ * registers are behind x0. */
+static int nm_sp_ioctl_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_sp_fionread_ctx *ctx = (struct nm_sp_fionread_ctx *)ri->data;
+	const struct pt_regs *u = (const struct pt_regs *)regs->regs[0];
+
+	if (!u || (unsigned int)u->regs[1] != FIONREAD)
+		return 1;
+	ctx->fd = (unsigned int)u->regs[0];
+	ctx->uptr = (int __user *)u->regs[2];
+	return 0;
+}
+
+static int nm_sp_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_sp_fionread_ctx *ctx = (struct nm_sp_fionread_ctx *)ri->data;
+	struct file *f;
+	loff_t eof;
+	int v;
+
+	if (regs_return_value(regs) != 0)
+		return 0;
+	f = fget(ctx->fd);
+	if (!f)
+		return 0;
+	if (S_ISREG(file_inode(f)->i_mode) && nm_raw_eof(f, &eof)) {
+		v = (int)(eof - f->f_pos);
+		/* The kernel's put_user() just touched this word; if it is gone now, its own
+		 * answer stays. */
+		copy_to_user_nofault(ctx->uptr, &v, sizeof(v));
+	}
+	fput(f);
+	return 0;
+}
+
 static struct kretprobe nm_sp_krp[] = {
 	{
 		.kp.symbol_name = "fcntl_getlk",
@@ -135,12 +185,28 @@ static struct kretprobe nm_sp_krp[] = {
 		.data_size      = sizeof(struct nm_sp_bytes_ctx),
 		.maxactive      = 64,
 	},
+	{
+		.kp.symbol_name = "__arm64_sys_ioctl",
+		.entry_handler  = nm_sp_ioctl_entry,
+		.handler        = nm_sp_ioctl_ret,
+		.data_size      = sizeof(struct nm_sp_fionread_ctx),
+		.maxactive      = 64,
+	},
+	{
+		.kp.symbol_name = "__arm64_compat_sys_ioctl",
+		.entry_handler  = nm_sp_ioctl_entry,
+		.handler        = nm_sp_ioctl_ret,
+		.data_size      = sizeof(struct nm_sp_fionread_ctx),
+		.maxactive      = 64,
+	},
 };
 
 static const char *const nm_sp_surface[] = {
 	"F_GETLK from SEEK_END is measured from the module copy's size",
 	"F_SETLK from SEEK_END is measured from the module copy's size",
 	"FIOQSIZE reports the module copy's bytes",
+	"FIONREAD reports the module copy's size",
+	"FIONREAD from 32-bit callers reports the module copy's size",
 };
 static bool nm_sp_armed[ARRAY_SIZE(nm_sp_krp)];
 

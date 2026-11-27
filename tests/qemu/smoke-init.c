@@ -349,7 +349,7 @@ static void seek_end_check(const char *dir, const char *name)
 }
 
 /* What a uid on the hide list sees, from a child that has dropped to it. */
-static void hidden_checks(int builtin)
+static void hidden_checks(void)
 {
 	int p[2], st;
 	pid_t pid;
@@ -389,9 +389,8 @@ static void hidden_checks(int builtin)
 			avail = -errno;
 		if (fd >= 0)
 			close(fd);
-		if (builtin)
-			say("%s fionread_hidden %d, stock %zu", avail == (int)strlen(stock_hosts) ? "ok" : "bad", avail,
-			    strlen(stock_hosts));
+		say("%s fionread_hidden %d, stock %zu", avail == (int)strlen(stock_hosts) ? "ok" : "bad", avail,
+		    strlen(stock_hosts));
 		fd = open("/v/etc/hosts", O_RDONLY | O_CLOEXEC);
 		if (fd >= 0) {
 			/* A range one byte before the stock file's start: stock refuses it (EINVAL); measured
@@ -431,7 +430,7 @@ static void hidden_checks(int builtin)
 	waitpid(pid, &st, 0);
 	{
 		const char *names[] = { "hidden_stock_bytes", "hidden_stat_stock", "hidden_no_injected",
-					"lock_eof_hidden", "fioqsize_hidden", builtin ? "fionread_hidden" : NULL };
+					"lock_eof_hidden", "fioqsize_hidden", "fionread_hidden" };
 		unsigned int i;
 
 		for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -514,7 +513,7 @@ int main(void)
 	victim_checks("/v", "erofs", n);
 	victim_checks("/x", "ext4", count_entries("/x/etc", "injected.conf", &hits));
 	seek_end_check("/v/etc", "seek_end_erofs");
-	hidden_checks(builtin);
+	hidden_checks();
 
 	rc = nm("del", "/v/etc/hosts", NULL);
 	got = slurp("/v/etc/hosts", buf, sizeof(buf));
