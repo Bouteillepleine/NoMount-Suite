@@ -2172,6 +2172,11 @@ mod tests {
                  is refused before last_ino is written",
             ),
             (
+                "run: sh tests/tail-gap-check.sh",
+                "the engine's listing tail on overlay and erofs: terminal d_off at the entry \
+                 count, and every buffer size resumes without a duplicate or a skip",
+            ),
+            (
                 "run: sh tests/guard-reset.sh",
                 "the bootloop guard across simulated boots: a late-pass panic still parks the \
                  Suite, two quick reboots do not",

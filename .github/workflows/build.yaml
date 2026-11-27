@@ -78,6 +78,9 @@ jobs:
       - name: Overlay layout check against shifted layouts
         run: sh tests/ovl-layout-check.sh
 
+      - name: Engine listing tail positions
+        run: sh tests/tail-gap-check.sh
+
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
 
