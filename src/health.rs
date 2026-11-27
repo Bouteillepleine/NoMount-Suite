@@ -379,19 +379,17 @@ fn others_can_search_to(target: &Path) -> bool {
     })
 }
 
-fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> String {
-    let Some(probe_uid) = probe_uid else {
-        return "unchecked:no-unhidden-app".to_string();
-    };
-    // Dropping uid needs setgroups/setresuid, which an inherited app filter kills with
-    // SIGSYS. Ask before forking rather than leaving a tombstone per probe.
-    if crate::audit::own_seccomp_mode().is_some_and(|m| m != 0) {
-        return "unchecked:seccomp-filtered".to_string();
-    }
-    const BUDGET: usize = 18;
+/// The injected targets the canary may sample, by (partition, module).
+///
+/// A rule that excludes the probe uid serves it stock on purpose, which would read as the
+/// divergence this canary looks for.
+fn canary_buckets(
+    rules: &[crate::nm::LiveRule],
+    probe_uid: u32,
+) -> std::collections::BTreeMap<(String, String), Vec<&Path>> {
     let mut buckets: std::collections::BTreeMap<(String, String), Vec<&Path>> =
         std::collections::BTreeMap::new();
-    for rule in rules.iter().filter(|r| r.uid == 0) {
+    for rule in rules.iter().filter(|r| r.uid == 0 && r.serves(probe_uid)) {
         let Some(src) = rule.source.as_deref() else { continue };
         let partition = rule
             .target
@@ -404,6 +402,20 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
             .unwrap_or_default();
         buckets.entry((partition, module)).or_default().push(rule.target.as_path());
     }
+    buckets
+}
+
+fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> String {
+    let Some(probe_uid) = probe_uid else {
+        return "unchecked:no-unhidden-app".to_string();
+    };
+    // Dropping uid needs setgroups/setresuid, which an inherited app filter kills with
+    // SIGSYS. Ask before forking rather than leaving a tombstone per probe.
+    if crate::audit::own_seccomp_mode().is_some_and(|m| m != 0) {
+        return "unchecked:seccomp-filtered".to_string();
+    }
+    const BUDGET: usize = 18;
+    let buckets = canary_buckets(rules, probe_uid);
     let mut sample: Vec<&Path> = Vec::new();
     'outer: for i in 0.. {
         let mut progressed = false;
@@ -1737,6 +1749,26 @@ rules=3
         let mut bad = fp("v30", 12);
         bad.consistency = "mismatch:/system/etc/x(root=12 app=ENOENT)".into();
         assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
+    }
+
+    #[test]
+    fn the_canary_never_samples_a_rule_that_excludes_the_probe_uid() {
+        let list = "/data/app/~~x/pkg-y/base.apk -> /data/adb/rvhc/m.apk \
+                    [SCOPE: 0-4294967295] [DENY: 10150]\n\
+                    /product/app/B/B.apk -> /data/adb/modules/M/product/app/B/B.apk \
+                    [SCOPE: 0-19999]\n\
+                    /system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n";
+        let rules = crate::nm::parse_list(list);
+        let sampled = |uid: u32| -> Vec<String> {
+            canary_buckets(&rules, uid)
+                .into_values()
+                .flatten()
+                .map(|p| p.display().to_string())
+                .collect()
+        };
+        assert_eq!(sampled(10150), ["/product/app/B/B.apk", "/system/etc/hosts"]);
+        assert_eq!(sampled(1010150), ["/system/etc/hosts"], "excluded by appid, and out of range");
+        assert_eq!(sampled(10151).len(), 3);
     }
 
     #[test]

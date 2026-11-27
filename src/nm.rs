@@ -549,6 +549,18 @@ pub(crate) struct LiveRule {
     pub scoped: bool,
     /// The excluded appids, parsed from `[DENY: a,b]`. Empty when unscoped.
     pub deny: Vec<u32>,
+    /// The top of `[SCOPE: lo-hi]`, whose bottom is `uid`. 0 when the rule has no range.
+    pub uid_end: u32,
+}
+
+impl LiveRule {
+    /// Whether a caller with this raw uid is served the rule's source rather than stock.
+    pub fn serves(&self, uid: u32) -> bool {
+        if self.uid_end != 0 && !(self.uid..=self.uid_end).contains(&uid) {
+            return false;
+        }
+        !self.deny.contains(&crate::blocklist::appid(uid))
+    }
 }
 
 /// `isolated=N erofs=N`, the whole of what `nm knobs` prints. A missing field is None
@@ -619,6 +631,12 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         .and_then(|(_, r)| r.split(']').next())
         .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
         .unwrap_or_default();
+    let uid_end: u32 = tail
+        .split_once("[SCOPE:")
+        .and_then(|(_, r)| r.split(']').next())
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(_, hi)| hi.trim().parse().ok())
+        .unwrap_or(0);
     let mut l = head.trim();
     if l.is_empty() {
         return None;
@@ -652,6 +670,7 @@ fn parse_line(line: &str) -> Option<LiveRule> {
             public,
             scoped,
             deny,
+            uid_end,
         });
     }
     let (t, s) = l.rsplit_once(" -> ")?;
@@ -667,6 +686,7 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         public,
         scoped,
         deny,
+        uid_end,
     })
 }
 
@@ -712,6 +732,21 @@ mod tests {
             vec![10170, 10397],
             "del_any deletes using exactly this set, so a misparse orphans the rule"
         );
+    }
+
+    #[test]
+    fn a_scope_and_an_exclusion_say_who_is_served() {
+        let r = parse_line("/a -> /b [SCOPE: 0-4294967295] [DENY: 10150]").expect("parsed");
+        assert_eq!(r.uid_end, 4294967295);
+        assert!(!r.serves(10150));
+        assert!(!r.serves(1010150), "an exclusion is an appid, so it covers every user");
+        assert!(r.serves(10151));
+        let ranged = parse_line("/a -> /b [UID: 10000] [SCOPE: 10000-19999]").expect("parsed");
+        assert!(ranged.serves(10500));
+        assert!(!ranged.serves(1010500) && !ranged.serves(2000));
+        let plain = parse_line("/a -> /b").expect("parsed");
+        assert_eq!(plain.uid_end, 0);
+        assert!(plain.serves(10150));
     }
 
     #[test]
