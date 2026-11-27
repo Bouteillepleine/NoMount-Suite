@@ -218,19 +218,20 @@ jobs:
 
           # A draft has no tag yet, so its asset URLs 404 for every device; a published
           # version is immutable, so its assets are only re-sent when that is asked for.
-          # A new release starts as a draft: Verify reads it back before anyone can fetch it,
-          # and only then does the next step make it public. A run that dies in between
-          # leaves a draft, which the next run fills (tag.yml treats a draft as unreleased).
+          # A new release is created public: the Actions token is refused a draft (HTTP 403
+          # "Resource not accessible by integration" on v1.3.219), where the same create
+          # without --draft published v1.3.218. Verify reads it back right after. A draft
+          # someone staged by hand is still filled (tag.yml treats a draft as unreleased).
           state=$(release_state)
           case "$state" in
             none)
               gh release create "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS \
                 --repo "$GITHUB_REPOSITORY" \
-                --draft \
                 --target "$GITHUB_SHA" \
                 --title "NoMount Suite $TAG" \
-                --notes-file /tmp/notes.md
-              state=draft
+                --notes-file /tmp/notes.md \
+                --latest
+              state=created
               ;;
             draft)
               echo "release $TAG is a draft: filling it at $GITHUB_SHA"
@@ -240,6 +241,7 @@ jobs:
               # prerelease is never releases/latest, which README.md links to.
               gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md \
                 --title "NoMount Suite $TAG" --target "$GITHUB_SHA" --prerelease=false
+              state=draft
               ;;
             published)
               _pre="$(mktemp -d)"
@@ -275,7 +277,7 @@ jobs:
       # the thing itself. Within one run they are built from the same dist/, but
       # nothing re-read them afterwards -- so an interleaved manual upload could
       # leave all three disagreeing and the run still green. Read them back.
-      # A new release is still a draft here, readable with this token and nobody else's.
+      # A hand-staged draft is still a draft here; a new release is already public.
       - name: Verify the release assets match the notes
         if: ${{ inputs.dry_run != 'true' }}
         env:
