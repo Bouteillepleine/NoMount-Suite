@@ -30,8 +30,9 @@ replaced by a stub. The bundle's `WITHHELD.txt` lists what it left out. If your 
 probably need `boot.log` too - run `nomount export /data/adb/nomount/report`, copy it off with
 `adb exec-out su -c "tar -C /data/adb/nomount/report -cf - ." > report.tar` (never via /sdcard, which apps can read) and share that privately.
 
-From a root shell instead - note `nomount` is **not on `PATH`**, it ships inside
-the module:
+From a root shell instead. On KernelSU and APatch `nomount` is on su's `PATH`
+(the Suite links it into `/data/adb/ksu/bin` or `/data/adb/ap/bin` at boot), so
+`nomount export` works; on Magisk, or when that link is missing, use the full path:
 
 ```
 /data/adb/modules/meta-nomount/bin/arm64-v8a/nomount export
