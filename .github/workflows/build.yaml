@@ -263,9 +263,10 @@ jobs:
           if [ -n "${{ matrix.ksrc }}" ]; then
             # The KMI branch at a pinned commit, prepared with the image's compiler.
             # modules_prepare writes no Module.symvers, which an empty __versions does not need:
-            # modpost only warns about the imports. RUST is off here because it selects extended
-            # modversions, whose name table modpost writes as `= ;` when no import has a CRC (a
-            # compile error in nomount.mod.c). It also selects the integer normalisation of kCFI
+            # modpost only warns about the imports. Extended modversions are off (and RUST, which
+            # selects them; gki_defconfig has already written the selection, so both are named):
+            # modpost writes their name table as `= ;` when no import has a CRC, a compile error
+            # in nomount.mod.c. It also selects the integer normalisation of kCFI
             # tags the GKI is built with, and a module hashed without it fails the CFI check on
             # init_module, so that one is set by hand and asserted. Neither changes struct
             # module, whose size the kernel checks on load.
@@ -274,7 +275,8 @@ jobs:
             curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
               "https://android.googlesource.com/kernel/common/+archive/${{ matrix.ksrc }}.tar.gz" | tar -xz -C "$KSRC"
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig > /dev/null
-            "$KSRC/scripts/config" --file "$KSRC/.config" -d RUST -e CFI_ICALL_NORMALIZE_INTEGERS
+            "$KSRC/scripts/config" --file "$KSRC/.config" -d RUST -d EXTENDED_MODVERSIONS \
+              -e CFI_ICALL_NORMALIZE_INTEGERS
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig > /dev/null
             grep -qx 'CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y' "$KSRC/.config" || {
               echo "::error::the ${{ matrix.ksrc }} tree would not take CFI_ICALL_NORMALIZE_INTEGERS"; exit 1; }
