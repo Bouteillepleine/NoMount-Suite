@@ -131,6 +131,11 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     }
     crate::mount::path_is_representable(path)
         .map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
+    // whiteouts.txt is read with the shared list grammar, so the rest of the line would be
+    // dropped at the next boot and a different, shorter path hidden instead.
+    if p.contains(" #") || p.contains("\t#") {
+        anyhow::bail!("refusing {p}: whiteouts.txt reads ' #' as the start of a comment");
+    }
     crate::mount::can_whiteout(path).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
     if let Ok(real) = fs::canonicalize(path) {
         resolved_is_allowed(path, &real).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
@@ -657,6 +662,15 @@ mod tests {
         assert!(crate::mount::can_whiteout_with(Path::new("/system/vendor"), &|_| true).is_ok());
         assert!(crate::mount::can_whiteout_with(Path::new("/system/vendor"), &|_| false).is_err());
         assert!(crate::mount::can_whiteout(Path::new("/vendor")).is_err());
+    }
+
+    #[test]
+    fn a_path_the_list_would_read_back_shorter_is_refused() {
+        let p = "/system/media/audio/ringtones/Tone #2.ogg";
+        let e = validate(p).expect_err("the list would hide /system/media/audio/ringtones/Tone");
+        assert!(e.to_string().contains("comment"), "{e}");
+        assert_eq!(parse(&format!("{p}\n")), ["/system/media/audio/ringtones/Tone"]);
+        assert!(validate("/system/media/audio/ringtones/Tone#2.ogg").is_ok());
     }
 
     #[test]
