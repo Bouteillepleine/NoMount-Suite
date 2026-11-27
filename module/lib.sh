@@ -83,7 +83,7 @@ nm_card() {
 }
 
 # package.sh points the LKM zip's updateJson at update-lkm.json; the WebUI tells them apart the same way.
-nm_lkm_zip() { grep -q update-lkm.json "$MODDIR/module.prop" 2>/dev/null; }
+nm_lkm_zip() { grep -q 'update-lkm.json' "$MODDIR/module.prop" 2>/dev/null; }
 
 nm_state_dir_repair() {
     find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
