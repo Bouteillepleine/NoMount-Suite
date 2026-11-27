@@ -178,10 +178,10 @@ hidden from a rule, on a file whose module copy differs in size from stock.
 Two more readers of the raw inode are covered here by the size guard
 (`nm_size_probes.c`) instead of a hook. A byte-range lock with `l_whence =
 SEEK_END` (`fcntl(F_GETLK)` and friends) measures from `i_size`, and FIOQSIZE
-(root and shell only) reports `i_blocks`. A kretprobe on `flock_to_posix_lock()`
-rewrites the range to the size the caller is served for that one conversion and
-puts the caller's fields back, and one on `inode_get_bytes()` answers a caller
-served the stock file with that file's bytes. A directory the engine creates, or
+(root and shell only) reports `i_blocks`. Kretprobes on `fcntl_getlk()` and
+`fcntl_setlk()` rewrite the range to the size the caller is served before it is
+computed and put the caller's fields back, and one on `inode_get_bytes()`
+answers a caller served the stock file with that file's bytes. A directory the engine creates, or
 takes over on an overlay partition, keeps its `i_size` at the size `stat` last gave.
 
 ## When it is still the right choice
