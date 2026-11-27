@@ -2167,6 +2167,11 @@ mod tests {
                  and the prune",
             ),
             (
+                "run: sh tests/ovl-layout-check.sh",
+                "the LKM's struct ovl_fs layout check: a layout the module was not built for \
+                 is refused before last_ino is written",
+            ),
+            (
                 "run: sh tests/guard-reset.sh",
                 "the bootloop guard across simulated boots: a late-pass panic still parks the \
                  Suite, two quick reboots do not",

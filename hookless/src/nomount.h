@@ -18,7 +18,7 @@
 #include <linux/jump_label.h>
 #include <linux/exportfs.h>
 
-#define NM_MODULE_VERSION "1.36.6"
+#define NM_MODULE_VERSION "1.36.7"
 
 #define NOMOUNT_VERSION    36
 #define NOMOUNT_HASH_BITS  12

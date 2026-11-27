@@ -75,6 +75,9 @@ jobs:
       - name: Bootloop guard across simulated boots
         run: sh tests/guard-reset.sh
 
+      - name: Overlay layout check against shifted layouts
+        run: sh tests/ovl-layout-check.sh
+
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
 
@@ -276,8 +279,16 @@ jobs:
             install -m755 "$mp_out/modpost" "$KDIR/scripts/mod/modpost"
             echo "modpost rebuilt from $mp_src with check_exports() restored"
           fi
+          # The image's own kernel source, for overlayfs/ovl_entry.h (lkm/Makefile, NM_OVL_SRC).
+          ovl_src=/opt/ddk/src/${{ matrix.kmi }}/fs
+          if [ -f "$ovl_src/overlayfs/ovl_entry.h" ]; then
+            echo "overlay counter: building with $ovl_src/overlayfs/ovl_entry.h"
+          else
+            echo "::warning::no overlayfs/ovl_entry.h in this image: ${{ matrix.kmi }} places overlay dirs above every inode"
+            ovl_src=""
+          fi
           make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
-               M="$GITHUB_WORKSPACE/lkm" modules
+               M="$GITHUB_WORKSPACE/lkm" ${ovl_src:+NM_OVL_SRC=$ovl_src} modules
           install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
           # -d leaves .BTF behind, and a module carrying BTF that does not match the
           # running kernel's base BTF is rejected on kernels built with

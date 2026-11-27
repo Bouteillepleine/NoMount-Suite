@@ -186,7 +186,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 \
+          make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 NM_OVL_SRC="$PWD/ksrc/fs" \
             M="$PWD/repo/lkm" modules 2>&1 | tee /tmp/lkm-${{ matrix.ver }}.log
 
       - name: Did it actually compile?

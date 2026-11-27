@@ -17,30 +17,18 @@ endif
 
 ccflags-y += -I$(src) -I$(src)/../hookless/src
 
-# NO -I$(srctree)/fs here, deliberately, and this comment is the reason.
-#
-# Adding it would let the out-of-tree build find overlayfs/ovl_entry.h and compile
-# nm_ovl_reserve_dir_ino(), which closes a real divergence: in tree the engine is copied
-# to fs/nomount.c and finds the header, so the 00_ and 01_ zips place directory inodes
-# differently on the same device. It was added on 2026-11-21 (9e1a53b) and reverted the
-# same evening, because the cure is worse:
-#
-#   struct ovl_fs *ofs = sb->s_fs_info;
-#   c = (u64)atomic_long_inc_return(&ofs->last_ino);
-#
-# That INCREMENTS a field at whatever byte offset the BUILD-TIME struct ovl_fs layout
-# put it. ovl_fs is private to fs/overlayfs/, is not exported, is not KMI-stable, and
-# its field order has moved between versions. In tree that is safe -- one tree, one
-# layout. Out of tree the .ko is built in a digest-pinned DDK container and then loaded
-# onto a device kernel, and ko-loader rewrites vermagic precisely so a different point
-# release will load it: if any field moved ahead of last_ino, that increment writes into
-# unrelated overlayfs superblock state. A visible placement difference between the two
-# zips beats a cross-kernel write into another filesystem's private state.
-#
-# The divergence stays VISIBLE instead: nomount.c #warning's when the header is missing,
-# and nm_place_dir_ino's `inoplace:` debug line carries ovl=%d, so a dmesg capture says
-# which build it came from. Closing it properly needs a layout check that does not exist
-# -- an exported accessor, or a KMI-stable way to ask overlayfs for its counter.
+# NM_OVL_SRC=<kernel source>/fs lets the out-of-tree build find overlayfs/ovl_entry.h, so
+# a synthesized overlay directory takes its number from the overlay's own counter as it does
+# in tree. CI points it at the DDK image's source for the KMI. Not -I$(srctree)/fs blindly:
+# 9e1a53b did that and incremented ofs->last_ino at the BUILD-TIME offset, on kernels the
+# .ko was not built for (ko-loader rewrites vermagic), and was reverted. struct ovl_fs is
+# private to overlayfs and not KMI-stable, so nomount.c's nm_ovl_layout_ok() now reads the
+# live layout back through invariants overlayfs keeps before anything is written, and leaves
+# the counter alone when they do not hold. Without NM_OVL_SRC the #warning in nomount.c says
+# which placement this build has.
+ifneq ($(NM_OVL_SRC),)
+ccflags-y += -I$(NM_OVL_SRC)
+endif
 
 # make ... NM_DEBUG=1  turns nm_debug()/nm_info() from no_printk into real printk.
 # Off by default: these fire per rule, and a mount pass installs hundreds.

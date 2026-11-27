@@ -21,25 +21,14 @@
     defined(__has_include)
 #if __has_include("overlayfs/ovl_entry.h")
 #include "overlayfs/ovl_entry.h"
+#include <linux/uaccess.h>
 #define NM_OVL_LAST_INO 1
 #else
-/* EXPECTED out of tree, and loud anyway, because it changes where directory inodes
- * land. The include is QUOTED, so it resolves against this file's own directory first
- * and then the -I list: in tree the engine is copied to fs/nomount.c and finds
- * fs/overlayfs/ovl_entry.h, while out of tree it stays in hookless/src/ and finds
- * nothing, so nm_ovl_reserve_dir_ino() compiles to `return 0` and the 00_ and 01_ zips
- * place directory inodes differently on the same device.
- *
- * Do NOT close that by adding -I$(srctree)/fs to lkm/Makefile. It was tried
- * (9e1a53b, reverted the same day): the reservation does
- * atomic_long_inc_return(&ofs->last_ino) at a BUILD-TIME offset into struct ovl_fs,
- * which is private to fs/overlayfs/, is not KMI-stable, and has been reordered between
- * versions -- and the .ko is loaded onto a kernel it was not built against, by design,
- * since ko-loader rewrites vermagic. A visible placement difference beats a blind write
- * into another filesystem's superblock state. See the long note in lkm/Makefile.
- *
- * So this warning is the record of WHICH build you have; nm_place_dir_ino()'s
- * `inoplace:` line carries the same bit as ovl=%d at runtime. */
+/* Out of tree the header comes from NM_OVL_SRC (lkm/Makefile; CI points it at the DDK
+ * image's own source). Without it nm_ovl_reserve_dir_ino() compiles to `return 0` and a
+ * synthesized overlay directory lands above every inode on the device, where the 00_ zip
+ * puts it next to its stock siblings. nm_place_dir_ino()'s `inoplace:` line carries
+ * ovl=%d at runtime, so a dmesg capture says which build it came from. */
 #warning "overlayfs/ovl_entry.h not found: no overlay dir-inode reservation (expected out of tree; see lkm/Makefile)"
 #endif
 #endif
@@ -5652,6 +5641,43 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
  * overlay mount whose dirs run 2..74, the partition dmax was ~384, so this returned 0 and
  * placement fell through to the partition band and produced 201 and 202.
  */
+#ifdef NM_OVL_LAST_INO
+/* struct ovl_fs is private to overlayfs and not KMI-stable, and the LKM is built against a
+ * DDK tree and loaded onto other point releases, so the build-time offset of last_ino is a
+ * guess until the live superblock confirms the layout. 9e1a53b incremented it unchecked
+ * and was reverted. Every read is fault-safe; only a layout that passes every invariant
+ * overlayfs keeps (super.c: layers[i].idx = i, fsid < numfs, xino_mode -1..32, last_ino
+ * counting up from 1) gets the increment. */
+static bool nm_ovl_layout_ok(struct ovl_fs *ofs, u64 local_max)
+{
+    unsigned int numlayer, numfs, i;
+    struct ovl_layer *layers;
+    int xino, idx, fsid;
+    long last;
+
+    if (copy_from_kernel_nofault(&numlayer, &ofs->numlayer, sizeof(numlayer)) ||
+        copy_from_kernel_nofault(&numfs, &ofs->numfs, sizeof(numfs)) ||
+        copy_from_kernel_nofault(&layers, &ofs->layers, sizeof(layers)) ||
+        copy_from_kernel_nofault(&xino, &ofs->xino_mode, sizeof(xino)) ||
+        copy_from_kernel_nofault(&last, &ofs->last_ino.counter, sizeof(last)))
+        return false;
+    if (numlayer < 1 || numlayer > 500 || numfs < 1 || numfs > numlayer || !layers)
+        return false;
+    if (xino < -1 || xino > 32)
+        return false;
+    if (last < 1 || (u64)last < local_max || (u64)last > local_max + (1UL << 20))
+        return false;
+    for (i = 0; i < numlayer; i++) {
+        if (copy_from_kernel_nofault(&idx, &layers[i].idx, sizeof(idx)) ||
+            copy_from_kernel_nofault(&fsid, &layers[i].fsid, sizeof(fsid)))
+            return false;
+        if (idx != (int)i || fsid < 0 || (unsigned int)fsid >= numfs)
+            return false;
+    }
+    return true;
+}
+#endif
+
 static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di, u64 local_max)
 {
     u64 c = 0;
@@ -5665,8 +5691,11 @@ static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di, u64 local_max)
     if (sb->s_magic == OVERLAYFS_SUPER_MAGIC && sb->s_dev == di->dev) {
         struct ovl_fs *ofs = sb->s_fs_info;
 
-        if (local_max && local_max <= (u64)atomic_long_read(&ofs->last_ino))
+        if (local_max && nm_ovl_layout_ok(ofs, local_max))
             c = (u64)atomic_long_inc_return(&ofs->last_ino);
+        else if (local_max)
+            nm_debug("inoplace: dev=%u:%u overlay layout not confirmed, counter untouched\n",
+                     MAJOR(di->dev), MINOR(di->dev));
     }
     path_put(&p);
 #endif
