@@ -122,6 +122,8 @@ mod tests {
             // matters most belongs to the install someone is upgrading to fix.
             "kmsg",
             "incident.log",
+            // Where re-arming the guard moves the record; the WebUI still shows and copies it.
+            "incident.prev",
             // Not a setting: lkm-load.sh copies the chosen engine module to the state dir
             // "so an update cannot remove it", then prunes the bundled per-KMI set from
             // $MODDIR after the first good boot. On an LKM device this is the only copy

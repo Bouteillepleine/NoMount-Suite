@@ -227,7 +227,7 @@ if [ -d "$_bak" ]; then
     # KEEP IN SYNC with the stash list in uninstall.sh and lib.sh's nm_consume_stash().
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              uidconceal ghostpaths kmsg incident.log nomount.ko \
+              uidconceal ghostpaths kmsg incident.log incident.prev nomount.ko \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list \
               apkscope public.txt accepted.list absorb-skip; do
         [ -e "$_bak/$_f" ] || continue

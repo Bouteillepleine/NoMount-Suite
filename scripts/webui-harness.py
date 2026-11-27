@@ -91,7 +91,9 @@ COMMANDS = {
     "appnm": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
              'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
     "disabled": "[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0",
-    "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
+    "incident": ("N=/data/adb/nomount; if [ -s $N/incident.log ]; then echo log; "
+                 "/system/bin/cat $N/incident.log; elif [ -s $N/incident.prev ]; then echo prev; "
+                 "/system/bin/cat $N/incident.prev; fi 2>/dev/null"),
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",
     "uidlist": "NM_BIN=%s/nm %s/nomount uid list" % (BIN, BIN),
     "check": "NM_BIN=%s/nm %s/nomount check --json" % (BIN, BIN),

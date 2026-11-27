@@ -500,8 +500,9 @@
       lines.push("");
     });
     // The incident record is the evidence a bootloop report needs, and re-arming moves it.
-    const inc = ((await exec("/system/bin/cat /data/adb/nomount/incident.log 2>/dev/null")).stdout || "").trim();
-    if (inc) lines.push("incident:", redactIncident(inc), "");
+    const inc = await readIncident();
+    if (inc.txt) lines.push(inc.prev ? "previous incident (guard re-armed):" : "incident:",
+                            redactIncident(inc.txt), "");
     const text = lines.join("\n");
     let ok = false;
     try {
@@ -575,12 +576,35 @@
     }
   }
 
+  // Re-arming renames incident.log to incident.prev, and the card and Copy report fall back
+  // to it: the dialog promises Copy incident still works until the next one.
+  async function readIncident() {
+    const r = await exec("N=/data/adb/nomount; if [ -s $N/incident.log ]; then echo log; " +
+      "/system/bin/cat $N/incident.log; elif [ -s $N/incident.prev ]; then echo prev; " +
+      "/system/bin/cat $N/incident.prev; fi 2>/dev/null");
+    const raw = (r && r.stdout) || "";
+    const nl = raw.indexOf("\n");
+    const kind = (nl < 0 ? raw : raw.slice(0, nl)).trim();
+    if (kind !== "log" && kind !== "prev") return { txt: raw.trim(), prev: false };
+    return { txt: nl < 0 ? "" : raw.slice(nl + 1).trim(), prev: kind === "prev" };
+  }
+  let INCIDENT_PREV = false;
+
   async function refreshIncident() {
-    const r = await exec("/system/bin/cat /data/adb/nomount/incident.log 2>/dev/null");
-    const txt = (r.stdout || "").trim();
+    const inc = await readIncident();
+    const txt = inc.txt;
+    INCIDENT_PREV = inc.prev;
     const card = $("incidentcard");
-    if (!txt) {
-      card.classList.add("u-hide");
+    if (!txt || inc.prev) {
+      if (txt) {
+        card.classList.remove("u-hide");
+        $("incidentout").textContent = txt;
+        $("incchip").textContent = "previous incident · guard re-armed";
+        $("incnote").textContent =
+          "Kept from the boot that tripped the guard, which has since been re-armed. Not live state.";
+      } else {
+        card.classList.add("u-hide");
+      }
       const w = $("incwarn");
       if (w) {
         w.hidden = !REBOOT_NOTICE;
@@ -635,7 +659,8 @@
     btn.disabled = true;
     // The banner used to be hidden BEFORE the delete and the result discarded, so a
     // refused rm left the record on disk with nothing on screen saying so.
-    const r = await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
+    const r = await exec("/system/bin/rm -f " + shq(INCIDENT_PREV
+      ? "/data/adb/nomount/incident.prev" : "/data/adb/nomount/incident.log"));
     if (r.errno === 0) {
       const el = $("incwarn");
       if (el) el.hidden = true;
