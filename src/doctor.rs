@@ -69,6 +69,13 @@ enum GhostSeen {
     Unknown,
 }
 
+/// The engine's own rule targets, which the ghost sample must not credit to the cloak. A
+/// failed list stays an Err: read as an empty set, it credited every engine path to the
+/// cloak and reported it verified.
+fn engine_targets_of(listed: Result<String>) -> Result<HashSet<PathBuf>> {
+    listed.map(|l| crate::nm::parse_list(&l).into_iter().map(|r| r.target).collect())
+}
+
 #[derive(Default)]
 struct GhostSample {
     attempted: usize,
@@ -1783,15 +1790,25 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     ),
                 });
             }
-            if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
+            // An engine-injected path is absent for a hidden uid with or without the cloak,
+            // so sampling only those could never fail. Paths no engine rule covers go first:
+            // they are the cloak's own work.
+            let engine_targets = (guids.first().is_some() && !gpaths.is_empty())
+                .then(|| engine_targets_of(nm.list_retry()));
+            let unclassified = matches!(engine_targets, Some(Err(_)));
+            if let Some(Err(e)) = &engine_targets {
+                f.push(Finding {
+                    level: Level::Unmeasured,
+                    check: "ghost cloak sample could not be classified",
+                    detail: format!(
+                        "the engine would not list its rules ({e:#}), so the cloak's own paths \
+                         could not be told from the ones the engine hides by itself, and the \
+                         existence cloak was not tested. This is not a pass."
+                    ),
+                });
+            }
+            if let (Some(&uid), Some(Ok(engine_targets))) = (guids.first(), engine_targets) {
                 const SAMPLE: usize = 16;
-                // An engine-injected path is absent for a hidden uid with or without the
-                // cloak, so sampling only those could never fail. Paths no engine rule covers
-                // go first: they are the cloak's own work.
-                let engine_targets: HashSet<PathBuf> = nm
-                    .list()
-                    .map(|l| crate::nm::parse_list(&l).into_iter().map(|r| r.target).collect())
-                    .unwrap_or_default();
                 let mut order: Vec<&PathBuf> =
                     gpaths.iter().filter(|p| !engine_targets.contains(*p)).collect();
                 order.extend(gpaths.iter().filter(|p| engine_targets.contains(*p)));
@@ -1829,7 +1846,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 }
                 let who = hidden_uid_label(uid, crate::blocklist::redact_hide_list());
                 f.extend(ghost_sample_findings(&sample, &who, crate::audit::probe_blocked_reason));
-            } else {
+            } else if !unclassified {
                 let nothing_hidden = hidden_apps.is_empty() && !hide_list_unreadable;
                 // Live rules count, not just the plan: an injection absorbed from another module
                 // or added by hand is served without ever appearing in the plan, and calling that
@@ -2116,6 +2133,14 @@ mod tests {
 
     use super::*;
     use crate::nm::LiveKind;
+
+    #[test]
+    fn an_unlistable_engine_classifies_no_ghost_path_as_the_cloak_s_own() {
+        assert!(engine_targets_of(Err(anyhow::anyhow!("nm exited 4"))).is_err());
+        let got = engine_targets_of(Ok("/system/etc/hosts -> /data/adb/modules/M/hosts\n".into()))
+            .expect("parsed");
+        assert!(got.contains(Path::new("/system/etc/hosts")));
+    }
 
     fn sample(attempted: usize, no_control: usize, unknown: usize, absent: usize, own: usize) -> GhostSample {
         GhostSample {
