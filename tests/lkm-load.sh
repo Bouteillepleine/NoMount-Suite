@@ -191,6 +191,8 @@ insert_setup() {
 	NM_LKM_SAY=:
 	nm_lkm_probe() { return 1; }
 	NM_LKM_LOADER="$WORK/ins/loader"
+	NM_LKM_KALLSYMS="$WORK/ins/kallsyms"
+	printf 'ffffffc080000000 T _text\n' > "$NM_LKM_KALLSYMS"
 	printf '#!/bin/sh\necho called >> "%s"\nexit 1\n' "$WORK/ins/ran" > "$NM_LKM_LOADER"
 	chmod 755 "$NM_LKM_LOADER"
 	mk "$WORK/ins/nomount.ko"
@@ -215,6 +217,15 @@ check "an empty second argument is not strict" "$(loader_runs)" "ran"
 insert_setup
 nm_lkm_insert "$WORK/ins/nomount.ko" bundled >/dev/null 2>&1
 check "an unrecognised second argument is not strict" "$(loader_runs)" "ran"
+
+insert_setup
+printf '0000000000000000 T _text\n' > "$NM_LKM_KALLSYMS"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1
+check "kallsyms with zeroed addresses: ko-loader is NOT used" "$(loader_runs)" "skipped"
+insert_setup
+: > "$NM_LKM_KALLSYMS"
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1
+check "unreadable kallsyms: ko-loader is NOT used" "$(loader_runs)" "skipped"
 
 # The real mapping from "went in" to the return code: in and confirmed is 0, in but
 # the probe is silent is 2. The stub above refuses, so these make each method succeed.
@@ -299,6 +310,45 @@ mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.69-android16-6-gdevice-4k\nstrict=1
 nm_lkm_load_best "$WORK/lkm" >/dev/null
 check "a kept guessed-KMI pick stays strict on the same kernel" \
 	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko=' | head -1)" "nomount.ko=strict"
+
+# A monthly OTA changes the release string, not the KMI: the kept copy goes first, as before it.
+setup "nomount.ko nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nkmi=android16-6.12\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "same KMI, new kernel: the kept copy is tried first" "$PICKED" "nomount.ko"
+check "  without strict" "$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko=' | head -1)" "nomount.ko=no"
+check "  and re-stamped for this kernel" \
+	"$(sed -n 's/^kver=//p' "$WORK/dev/nomount.ko.bundled")" "6.12.69-android16-6-gdevice-4k"
+check "  keeping its KMI" "$(sed -n 's/^kmi=//p' "$WORK/dev/nomount.ko.bundled")" "android16-6.12"
+
+setup "nomount.ko nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nkmi=android15-6.12\nstrict=0\n' > "$WORK/dev/nomount.ko.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "another KMI: the bundled set goes first" "$PICKED" "nomount-android16-6.12.ko"
+
+setup "nomount.ko nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko"; printf 'kver=6.12.58-old\nkmi=android16-6.12\nstrict=1\n' > "$WORK/dev/nomount.ko.bundled"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a strict (guessed) pick is not trusted across kernels even on its KMI" "$PICKED" "nomount-android16-6.12.ko"
+
+setup "nomount-android16-6.12.ko"
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a new pick records its KMI" "$(sed -n 's/^kmi=//p' "$WORK/dev/nomount.ko.bundled")" "android16-6.12"
+
+echo
+echo "a kernel the zip has no module for says so"
+setup ""
+mk "$WORK/lkm/nomount-android15-6.6.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "no module for this KMI: NM_LKM_NOMATCH is set" "${NM_LKM_NOMATCH:-unset}" "1"
+setup ""
+mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "a module exists but does not load: NM_LKM_NOMATCH stays clear" "${NM_LKM_NOMATCH:-unset}" "unset"
 
 setup "nomount-android16-6.12.ko"
 mk "$WORK/dev/nomount.ko"; : > "$WORK/dev/nomount.ko.bundled"; mk "$WORK/lkm/nomount-android16-6.12.ko"

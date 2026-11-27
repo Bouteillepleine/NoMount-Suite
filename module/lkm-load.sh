@@ -2,7 +2,9 @@
 
 : "${NM_LKM_NM:=}"
 : "${NM_LKM_DEVICE_KO:=/data/adb/nomount/nomount.ko}"
+: "${NM_LKM_KALLSYMS:=/proc/kallsyms}"
 NM_LKM_SOURCE=
+NM_LKM_NOMATCH=
 
 nm_lkm_probe() {
 	[ -x "$NM_LKM_NM" ] || return 1
@@ -11,6 +13,14 @@ nm_lkm_probe() {
 
 nm_lkm_kver() { uname -r | cut -d. -f1,2; }
 nm_lkm_akver() { uname -r | grep -oE 'android[0-9]+' | head -1; }
+nm_lkm_kmi() { _ka=$(nm_lkm_akver); [ -n "$_ka" ] && echo "$_ka-$(nm_lkm_kver)"; }
+
+# ko-loader resolves the module's imports out of kallsyms. With kptr_restrict hiding the
+# addresses every one reads as 0, and the module's init calls through a null pointer.
+nm_lkm_kallsyms_ok() {
+	_ka=$(head -n 1 "$NM_LKM_KALLSYMS" 2>/dev/null | cut -d' ' -f1)
+	case "$_ka" in ''|*[!0]*) [ -n "$_ka" ] ;; *) return 1 ;; esac
+}
 
 nm_lkm_echo() {
 	[ -n "$1" ] || return 0
@@ -73,7 +83,9 @@ nm_lkm_insert() {
 		$NM_LKM_SAY "    the kernel has against a module built for another struct layout"
 	fi
 
-	if [ "$_strict" != strict ] && [ -x "$NM_LKM_LOADER" ]; then
+	if [ "$_strict" != strict ] && [ -x "$NM_LKM_LOADER" ] && ! nm_lkm_kallsyms_ok; then
+		$NM_LKM_SAY "    not using ko-loader: $NM_LKM_KALLSYMS shows no addresses here, and it would bind every import to 0"
+	elif [ "$_strict" != strict ] && [ -x "$NM_LKM_LOADER" ]; then
 		# ko-loader is the only step that can rewrite vermagic, so its output is
 		# the one line that explains why a module did or did not go in. Throwing
 		# it away left an install log with two "trying" lines and no reason.
@@ -112,8 +124,8 @@ nm_lkm_keep() {
 			chmod 0600 "$NM_LKM_DEVICE_KO" 2>/dev/null
 			# What it was picked for: after a kernel change, or for a guessed KMI, it must not
 			# be the first candidate tried without the strict checks.
-			printf 'kver=%s\nstrict=%s\n' "$(uname -r)" "$([ "$_kstrict" = strict ] && echo 1 || echo 0)" \
-				> "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
+			printf 'kver=%s\nkmi=%s\nstrict=%s\n' "$(uname -r)" "$(nm_lkm_kmi)" \
+				"$([ "$_kstrict" = strict ] && echo 1 || echo 0)" > "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
 			rm -f "$NM_LKM_DEVICE_KO.prev" 2>/dev/null
 			$NM_LKM_SAY "  kept it at $NM_LKM_DEVICE_KO so an update cannot remove it"
 			return 0
@@ -151,12 +163,18 @@ nm_lkm_load_best() {
 	# reason - so this is tried first, every boot, and never cached over.
 	# A load that the probe could not confirm (2) is still a load: stop, and
 	# hand the caller the code so it can say which of the two happened.
-	_kept=""; _kstrict=""
+	_kept=""; _kstrict=""; _restamp=""
 	if [ -f "$NM_LKM_DEVICE_KO" ]; then
 		if [ -f "$NM_LKM_DEVICE_KO.bundled" ]; then
 			_kk=$(sed -n 's/^kver=//p' "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null)
+			_kkmi=$(sed -n 's/^kmi=//p' "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null)
 			[ "$(sed -n 's/^strict=//p' "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null)" = 1 ] && _kstrict=strict
-			if [ "$_kk" != "$(uname -r)" ]; then
+			# Same KMI, new point release (a monthly OTA): the GKI contract keeps the layout, and
+			# module_layout refuses the copy if it did not. Only a KMI change makes it a guess.
+			if [ "$_kk" != "$(uname -r)" ] && [ -n "$_kkmi" ] && [ "$_kkmi" = "$(nm_lkm_kmi)" ] && [ -z "$_kstrict" ]; then
+				$NM_LKM_SAY "  trying $NM_LKM_DEVICE_KO (kept for $_kkmi, this kernel's KMI)"
+				_restamp=1
+			elif [ "$_kk" != "$(uname -r)" ]; then
 				_kept=stale
 				$NM_LKM_SAY "  the kept module was picked for ${_kk:-another kernel}: trying the bundled set first"
 			else
@@ -169,6 +187,8 @@ nm_lkm_load_best() {
 			nm_lkm_insert "$NM_LKM_DEVICE_KO" $_kstrict; _rc=$?
 			if [ "$_rc" != 1 ]; then
 				NM_LKM_SOURCE=device
+				[ "${_restamp:-}" = 1 ] && printf 'kver=%s\nkmi=%s\nstrict=0\n' "$(uname -r)" "$(nm_lkm_kmi)" \
+					> "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
 				return "$_rc"
 			fi
 		fi
@@ -193,6 +213,11 @@ nm_lkm_load_best() {
 		rm -f "$_dir/nomount.ko" 2>/dev/null
 	fi
 
+	if [ ! -f "$_exact" ] && ! ls "$_dir"/nomount-*-"${_kver}".ko >/dev/null 2>&1; then
+		# shellcheck disable=SC2034  # read by lib.sh and customize.sh, which source this file
+		NM_LKM_NOMATCH=1
+		$NM_LKM_SAY "  this zip has no engine module for ${_akver:-this kernel}-${_kver}"
+	fi
 	if [ -n "$_akver" ] && [ -f "$_exact" ]; then
 		$NM_LKM_SAY "  trying ${_akver}-${_kver} (exact KMI match)"
 		nm_lkm_insert "$_exact"; _rc=$?
@@ -231,7 +256,7 @@ nm_lkm_try_kept_stale() {
 	nm_lkm_insert "$NM_LKM_DEVICE_KO" strict; _rc=$?
 	if [ "$_rc" != 1 ]; then
 		NM_LKM_SOURCE=device
-		printf 'kver=%s\nstrict=1\n' "$(uname -r)" > "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
+		printf 'kver=%s\nkmi=%s\nstrict=1\n' "$(uname -r)" "$(nm_lkm_kmi)" > "$NM_LKM_DEVICE_KO.bundled" 2>/dev/null
 	fi
 	[ "$_rc" = 0 ]
 }

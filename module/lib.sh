@@ -201,6 +201,8 @@ nm_lkm_boot_load() {
     elif [ "$_lrc" = 2 ]; then
         nmlog "⚠ engine module loaded from ${NM_LKM_SOURCE:-?} but $NM_BIN did not answer - the ENGINE IS UP; the probe binary is missing, built for another ABI, or not executable. Do not reflash the kernel."
         nm_lkm_prune "$MODDIR/lkm"
+    elif [ "${NM_LKM_NOMATCH:-}" = 1 ] && [ ! -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
+        nmlog "⛔ this zip has no engine module for $(uname -r) - nothing will be injected this boot. Use a kernel with NoMount built in and the 00_ zip."
     elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
         nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
     fi

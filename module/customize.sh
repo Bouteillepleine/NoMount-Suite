@@ -187,6 +187,11 @@ if [ -x "$_nm" ]; then
             ui_print "! Flash 01_NoMount-Module-LKM from the same release - it"
             ui_print "! carries a module per KMI - or drop a matching one at"
             ui_print "! /data/adb/nomount/nomount.ko."
+        elif [ "${NM_LKM_NOMATCH:-}" = 1 ]; then
+            ui_print "! This zip carries no engine module for this kernel's"
+            ui_print "! KMI yet (android17-6.18 is held back until a build"
+            ui_print "! matches its KMI). Use a kernel with NoMount built in"
+            ui_print "! and the 00_ zip from the same release."
         else
             ui_print "! The kernel's NoMount engine did not answer, and no"
             ui_print "! bundled module loads on it either."

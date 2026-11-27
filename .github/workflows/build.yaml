@@ -211,19 +211,30 @@ jobs:
           # already pinned or checksummed; this was the one dependency that was not.
           #
           # The tag is kept for readability: docker resolves `name:tag@digest` by digest.
+          #
+          # layout: the KMI's own module_layout CRC (android/abi_gki_aarch64.stg at the KMI; 6.12
+          # also read off the OP15 6.12.69's 564 modules). The kernel compares it before resolving
+          # a single symbol, so ko-loader and ksud insmod cannot get past a wrong one.
+          # versions: stock = rebuild modpost so __versions carries CRCs, which must match layout;
+          # empty = keep the image's modpost and ship an empty __versions, which loads with a
+          # "no symbol version" warning. 6.12 is empty: its DDK CRCs (gendwarfksyms) differ from
+          # Google's for every KMI symbol, type-free ones included, so v1.3.218's could not load.
+          # ship: false builds and gates the row but keeps it out of the zip. 6.18's image is built
+          # from android17-6.18-lts, whose struct-bearing CRCs differ from the KMI: an empty table
+          # there would load a module laid out for another kernel.
           # To move one, read the new digest off the registry rather than trusting a pull:
           #   TOKEN=$(curl -s 'https://ghcr.io/token?scope=repository%3Aylarod%2Fddk%3Apull&service=ghcr.io' | jq -r .token)
           #   curl -sI -H "Authorization: Bearer $TOKEN" \
           #     -H 'Accept: application/vnd.oci.image.index.v1+json' \
           #     https://ghcr.io/v2/ylarod/ddk/manifests/<kmi>-<tag> | grep -i docker-content-digest
-          - { kmi: android12-5.10, tag: '20251104', digest: 'sha256:23b571c67d0375557fde0485183d372d572afb0b96b2c92e84b1d56eb4ac2037' }
-          - { kmi: android13-5.10, tag: '20251104', digest: 'sha256:37c2187c81e8e4870a8f7a8596c96d6b9de13d1d0d465c0bef8a62d0e52f9e63' }
-          - { kmi: android13-5.15, tag: '20251104', digest: 'sha256:593b73918e06a3f73b5c97a8b395d6d8bd1dc925d6a9a85384938c74183ed2d9' }
-          - { kmi: android14-5.15, tag: '20251104', digest: 'sha256:9b4ba1f841d559552e37c6fed6a4e50b3b6ada00fd6ea1a8e554514b0b478349' }
-          - { kmi: android14-6.1,  tag: '20251104', digest: 'sha256:b71b1fbde7234a2784bb8f8cf367ecc2ed50c5e4544a924135fa3e9ef96cf3bd' }
-          - { kmi: android15-6.6,  tag: '20251104', digest: 'sha256:e2a1c36aef4837865d0d269401f1403fdefda1b39affdb7a9eab66735f6defff' }
-          - { kmi: android16-6.12, tag: '20251104', digest: 'sha256:86216ff10dbe3e6d73477ac7fc3512414f394429b18b2f7be32182f34700ebd1' }
-          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268' }
+          - { kmi: android12-5.10, tag: '20251104', digest: 'sha256:23b571c67d0375557fde0485183d372d572afb0b96b2c92e84b1d56eb4ac2037', versions: stock, layout: '0x7c24b32d', ship: true }
+          - { kmi: android13-5.10, tag: '20251104', digest: 'sha256:37c2187c81e8e4870a8f7a8596c96d6b9de13d1d0d465c0bef8a62d0e52f9e63', versions: stock, layout: '0x6584ccbd', ship: true }
+          - { kmi: android13-5.15, tag: '20251104', digest: 'sha256:593b73918e06a3f73b5c97a8b395d6d8bd1dc925d6a9a85384938c74183ed2d9', versions: stock, layout: '0x0222dd63', ship: true }
+          - { kmi: android14-5.15, tag: '20251104', digest: 'sha256:9b4ba1f841d559552e37c6fed6a4e50b3b6ada00fd6ea1a8e554514b0b478349', versions: stock, layout: '0x4bcc9336', ship: true }
+          - { kmi: android14-6.1,  tag: '20251104', digest: 'sha256:b71b1fbde7234a2784bb8f8cf367ecc2ed50c5e4544a924135fa3e9ef96cf3bd', versions: stock, layout: '0xea759d7f', ship: true }
+          - { kmi: android15-6.6,  tag: '20251104', digest: 'sha256:e2a1c36aef4837865d0d269401f1403fdefda1b39affdb7a9eab66735f6defff', versions: stock, layout: '0x4e276f37', ship: true }
+          - { kmi: android16-6.12, tag: '20251104', digest: 'sha256:86216ff10dbe3e6d73477ac7fc3512414f394429b18b2f7be32182f34700ebd1', versions: empty, layout: '0x797f2b3e', ship: true }
+          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268', versions: stock, layout: '0xee9c6aa0', ship: false }
     container:
       image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}@${{ matrix.digest }}
     steps:
@@ -245,7 +256,9 @@ jobs:
           mp_cmd_src=$(sed -n 's|^[a-z]*cmd_scripts/mod/modpost\.o := .* \([^ ]*/scripts/mod/modpost\.c\)$|\1|p' \
                        "$KDIR/scripts/mod/.modpost.o.cmd" 2>/dev/null)
           case "$mp_cmd_src" in /*|'') mp_src=$mp_cmd_src ;; *) mp_src="$KDIR/$mp_cmd_src" ;; esac
-          if [ -n "$mp_src" ] && grep -qE '^[[:space:]]*//[[:space:]]*check_exports\(mod\);' "$mp_src"; then
+          if [ "${{ matrix.versions }}" = empty ]; then
+            echo "versions=empty for ${{ matrix.kmi }}: the image's own modpost, so __versions ships empty"
+          elif [ -n "$mp_src" ] && grep -qE '^[[:space:]]*//[[:space:]]*check_exports\(mod\);' "$mp_src"; then
             mp_stock="${mp_src%.c}.stock.c"
             sed -E -e 's#^[[:space:]]*//[[:space:]]*(check_exports\(mod\);)#\t\1#' \
                    -e 's#^[[:space:]]*//([[:space:]]*s->module = exp->module;)#\1#' "$mp_src" > "$mp_stock"
@@ -286,18 +299,41 @@ jobs:
             fi
             break
           done
-          # A MODVERSIONS kernel accepts a module whose __versions is empty, checking no CRC at
-          # all. That is how the 6.1+ modules shipped; refuse to ship one again.
+          # A non-empty __versions is not enough: v1.3.218's 6.12 module carried 155 CRCs, none of
+          # them the KMI's, and no GKI kernel would load it. module_layout must equal the KMI's.
           if grep -qs '^CONFIG_MODVERSIONS=y' "$KDIR/.config" "$KDIR/include/config/auto.conf"; then
+            KO="out/nomount-${{ matrix.kmi }}.ko"
             for _re in llvm-readelf readelf; do command -v "$_re" >/dev/null 2>&1 && break; done
-            vhex=$("$_re" -SW "out/nomount-${{ matrix.kmi }}.ko" \
-                   | awk '{for (i = 1; i <= NF; i++) if ($i == "__versions") { print $(i + 4); exit }}')
-            vlen=$(printf '%d' "0x${vhex:-0}")
-            if [ "$vlen" -eq 0 ]; then
-              echo "::error::nomount-${{ matrix.kmi }}.ko has no symbol CRCs (__versions size ${vhex:-missing}) on a MODVERSIONS kernel"
-              exit 1
+            vrow=$("$_re" -SW "$KO" \
+                   | awk '{for (i = 1; i <= NF; i++) if ($i == "__versions") { print $(i + 3), $(i + 4); exit }}')
+            voff=$(printf '%d' "0x${vrow% *}" 2>/dev/null || echo 0)
+            vlen=$(printf '%d' "0x${vrow#* }" 2>/dev/null || echo 0)
+            [ -n "$vrow" ] || vlen=0
+            if [ "${{ matrix.versions }}" = empty ]; then
+              if [ "$vlen" -ne 0 ]; then
+                echo "::error::$KO must ship an empty __versions (row versions=empty), it has $((vlen / 64)) CRCs"
+                exit 1
+              fi
+              [ -n "$vrow" ] || { echo "::error::$KO has no __versions section at all: insmod would need --force"; exit 1; }
+              echo "__versions: empty, as the row asks (loads with a \"no symbol version\" warning)"
+            else
+              [ "$vlen" -ge 128 ] || {
+                echo "::error::$KO has $((vlen / 64)) CRC entries on a MODVERSIONS kernel"; exit 1; }
+              dd if="$KO" of=/tmp/versions.bin bs=1 skip="$voff" count="$vlen" 2>/dev/null
+              off=$(grep -obUa 'module_layout' /tmp/versions.bin | cut -d: -f1 | while read -r o; do
+                      [ $((o % 64)) -eq 8 ] && { echo "$o"; break; }; done)
+              [ -n "$off" ] || { echo "::error::$KO has no module_layout row in __versions"; exit 1; }
+              crc=0x$(dd if=/tmp/versions.bin bs=1 skip=$((off - 8)) count=4 2>/dev/null | od -An -tx4 | tr -d ' \n')
+              if [ "$crc" != "${{ matrix.layout }}" ]; then
+                if [ "${{ matrix.ship }}" = true ]; then
+                  echo "::error::$KO module_layout $crc, KMI ${{ matrix.layout }}: no ${{ matrix.kmi }} kernel would load it"
+                  exit 1
+                fi
+                echo "::warning::${{ matrix.kmi }} held back: module_layout $crc, KMI ${{ matrix.layout }}"
+              else
+                echo "__versions: $((vlen / 64)) CRC entries, module_layout $crc = KMI"
+              fi
             fi
-            echo "__versions: $((vlen / 64)) CRC entries"
           fi
           ls -l "out/nomount-${{ matrix.kmi }}.ko"
 
@@ -398,6 +434,7 @@ jobs:
           done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ matrix.ship }}
         with:
           name: ko-${{ matrix.kmi }}
           path: out/nomount-${{ matrix.kmi }}.ko
@@ -440,23 +477,23 @@ jobs:
           find artifacts -name 'nomount-*.ko' -exec cp {} module/lkm/ \;
           n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
           find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
-          [ "$n" -eq 8 ] || { echo "::error::expected 8 engine modules, got $n"; exit 1; }
-          # The count alone is satisfied by eight copies of one module. Each ko job now
+          [ "$n" -eq 7 ] || { echo "::error::expected 7 engine modules (8 rows, 6.18 held), got $n"; exit 1; }
+          # The count alone is satisfied by seven copies of one module. Each ko job now
           # asserts its own vermagic against its KMI, which catches a row built against
           # the wrong image; this catches the other half -- the artifact download or the
           # `cp` above collapsing two rows onto one file, where every name is right and
-          # one kernel silently gets another's module. Eight names, eight contents.
+          # one kernel silently gets another's module. Seven names, seven contents.
           d=$(find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + \
               | awk '{print $1}' | sort -u | wc -l)
-          [ "$d" -eq 8 ] || {
-            echo "::error::8 engine modules but only $d distinct, so a KMI is shipping"
+          [ "$d" -eq 7 ] || {
+            echo "::error::7 engine modules but only $d distinct, so a KMI is shipping"
             echo "::error::another KMI's module under its own name"
             find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + | sort
             exit 1; }
           # Said out loud, because a gate that prints nothing when it passes cannot be
           # told from one that did not run -- which is how CONFIG_OVERLAY_FS and the
           # -Werror #warning both hid for weeks. One line, and the log shows the check.
-          echo "8 engine modules, $d distinct"
+          echo "7 engine modules, $d distinct"
 
       - name: Setup zig
         env:

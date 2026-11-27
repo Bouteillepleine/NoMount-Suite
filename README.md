@@ -31,7 +31,7 @@ Each [release](https://github.com/Bouteillepleine/NoMount-Suite/releases/latest)
 | Zip | For |
 | :--- | :--- |
 | `00_NoMount-Module` | A kernel with the engine built in: the [`BakaSu`](https://github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases), [`KsuNext`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`SukiSu`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases) OnePlus kernels, or your own build with `CONFIG_NOMOUNT=y` from [`hookless/`](hookless/) |
-| `01_NoMount-Module-LKM` | A stock GKI kernel. It loads the engine as a module at boot (android12-5.10 to android17-6.18) |
+| `01_NoMount-Module-LKM` | A stock GKI kernel. It loads the engine as a module at boot (android12-5.10 to android16-6.12) |
 
 Flash it from your manager, reboot, then check from a root shell:
 
@@ -91,7 +91,7 @@ cargo test && ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --lite
 ```
 
 That builds the 00_ zip, for a kernel with NoMount built in. Without `--lite`,
-`package.sh` also packages the 01_ zip and stops unless the eight
+`package.sh` also packages the 01_ zip and stops unless the seven
 `module/lkm/nomount-*.ko` from CI's `build.yaml` are there; a release build
 (`--version vX.Y.Z`) also needs `module/bin/ko-loader-arm64`.
 

@@ -206,7 +206,7 @@ difference between "it still compiles" and "here is a module you can load".
 | where | what it does | cost |
 | :--- | :--- | :--- |
 | **`.github/workflows/lkm-build.yml`** - *NoMount LKM - out-of-tree build* | compile gate across all ten kernels, on every push to `main` touching `lkm/**`, `hookless/src/**` or the workflow itself. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. Dispatchable with `only: 4.9,6.12` to run a subset. | ~10 min |
-| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the eight modules that actually ship. One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so the link is genuine. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
+| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the seven modules that actually ship (the android17-6.18 row is built and held back until a kdir matches its KMI). One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so the link is genuine. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
 
 There is no dispatch-only "build me a loadable module" workflow. An earlier
 version of this file described one, with `kernel_repo`/`kernel_ref`/`defconfig`
