@@ -63,20 +63,21 @@ nm_lkm_build_of() {
 # pre-resolves its undefined symbols out of /proc/kallsyms, writing each address
 # in as SHN_ABS. simplify_symbols() only version-checks SHN_UNDEF symbols, so a
 # pre-resolved one skips check_version() entirely. ksud insmod does the same two
-# things. What is left is the module's own module_layout CRC and, on 6.6+, the
-# size of struct module.
+# things. What is left is the module's own module_layout CRC (absent from the
+# 6.12 module, which ships an empty __versions) and, on 6.6+, the size of struct module.
 #
-# That is the intended mechanism for a module whose KMI matches -- a stock
-# android16-6.12 .ko can never match a specific device's 6.12.x-android16-ab...
-# build string, and "same KMI => same layout" is the GKI contract. It is NOT
-# intended for a module picked by guessing the KMI, which is what the "same
-# version, other KMI" fallback in nm_lkm_load_best does, and only ever can on
-# 5.10 and 5.15 -- the two versions shipping two KMIs each (android12/13 and
-# android13/14). There the rewrite forces in a module built across a KABI
-# boundary. Strict mode leaves that path with plain insmod, which checks every
-# symbol CRC (a MODVERSIONS kernel skips the version in vermagic), so the fallback
-# still works where it legitimately should (a custom kernel whose uname carries no
-# androidNN, so no exact match exists, but whose KMI genuinely matches a shipped module).
+# On a stock GKI kernel that is the ONLY way in: 7 to 51 of each module's imports
+# are outside the KMI symbol list (lkm/kmi-imports/), so plain insmod stops at
+# "Unknown symbol", or on 6.6+ "Protected symbol" for an unsigned module. A stock
+# android16-6.12 .ko can never match a device's 6.12.x-android16-ab... build
+# string either, and "same KMI => same layout" is the GKI contract.
+#
+# It is NOT meant for a module picked by guessing the KMI, which is what the
+# "same version, other KMI" fallback in nm_lkm_load_best does, and only ever can
+# on 5.10 and 5.15 -- the two versions shipping two KMIs each (android12/13 and
+# android13/14). Strict mode leaves that path with plain insmod, so it loads only
+# on a kernel that exports every import, a custom build without symbol trimming,
+# where insmod checks each symbol's CRC. On a stock GKI a strict attempt fails.
 nm_lkm_insert() {
 	_ko="$1"
 	_strict="${2:-}"
@@ -95,8 +96,8 @@ nm_lkm_insert() {
 
 	if [ "$_strict" = strict ]; then
 		$NM_LKM_SAY "    not using ko-loader or ksud insmod here: this module's KMI was guessed"
-		$NM_LKM_SAY "    from the kernel version alone, and both bypass the symbol CRC checks"
-		$NM_LKM_SAY "    the kernel has against a module built for another struct layout"
+		$NM_LKM_SAY "    from the kernel version alone, so only plain insmod, which loads it"
+		$NM_LKM_SAY "    only on a kernel that exports every symbol it imports"
 	fi
 
 	if [ "$_strict" != strict ] && [ -x "$NM_LKM_LOADER" ] && ! nm_lkm_kallsyms_ok; then

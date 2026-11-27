@@ -68,9 +68,12 @@ present on every supported GKI KMI (checked against each `System.map`), and if
 registration ever fails the module logs it and carries on with paths redirected
 and maps un-spoofed, rather than failing to load.
 
-**None of this has been exercised on hardware.** It compiles on all ten kernel
-versions and links against all eight KMI export tables; whether the spoof
-produces the right bytes on a running phone is untested.
+It compiles on all ten kernel versions. On a phone, the maps spoof, the xattr
+guard and the self-hide were measured on an OP15 (6.12) in October. In CI the
+`lkm-smoke` job of `build.yaml` loads every shipped module with ko-loader on
+Google's own GKI build of its KMI under qemu and runs the engine checks there;
+that covers the load and the engine, not the kprobe guards, which qemu has no
+detector to exercise.
 
 **3. The maps cloak is here, minus its accounting arm and two vma walkers.** `pathhide` keeps the
 root stack's own libraries out of an app's `/proc/<pid>/maps`. Dropping the line
@@ -148,12 +151,17 @@ the same process-context mechanism the accounting arm needs.
 `tests/lkm-pathhide.sh` checks the maps/map_files agreement directly and fails
 if they diverge.
 
-Two symbols `pathhide.c` reaches for are absent from some trimmed KMIs:
-`backing_file_user_path`, via `file_user_path()` on 6.7+, and
-`percpu_counter_batch`, via the accounting helper that currently has no caller.
-Both are exported by stock 6.12.69 and both have `EXPORT_SYMBOL` in the kernel
-source, so the compile gate passes; a device whose OEM trimmed them would need
-a kallsyms redirect.
+Not every symbol the module imports is exported by a stock GKI. A GKI release
+exports only its KMI symbol list, and the DDK trees the modules link against do
+not trim, so modpost accepts imports a phone has no `__ksymtab` entry for: 7 on
+android16-6.12, up to 51 on android13-5.10 (`d_lookup`, `netlink_rcv_skb`,
+`vfs_getxattr`, ... and, on 5.10 and 5.15, `percpu_counter_batch` through the
+accounting helper that has no caller). Those resolve only through ko-loader or
+`ksud insmod`, which bind them from `/proc/kallsyms`. `lkm/kmi-imports/<kmi>.txt`
+names them per KMI, and CI checks each list against a pinned GKI build's
+`System.map`: a new one fails the build until it is listed, and a listed one with
+no symbol of its own there (inlined or renamed, so kallsyms has nothing to bind)
+fails too.
 
 **4. FIONREAD can still report the module file's size.** `ioctl(fd, FIONREAD)`
 answers `i_size` off the file's inode before any file operation runs, and an
@@ -209,13 +217,15 @@ repository, and this variant cannot silently drift from the in-tree one.
 
 ### Building it in CI
 
-Two jobs, in two different workflows, and the difference between them is the
-difference between "it still compiles" and "here is a module you can load".
+Two jobs build it, in two different workflows, and the difference between them
+is the difference between "it still compiles" and "here is a module you can
+load". A third proves the second.
 
 | where | what it does | cost |
 | :--- | :--- | :--- |
 | **`.github/workflows/lkm-build.yml`** - *NoMount LKM - out-of-tree build* | compile gate across all ten kernels, on every push to `main` touching `lkm/**`, `hookless/src/**` or the workflow itself. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. Dispatchable with `only: 4.9,6.12` to run a subset. | ~10 min |
-| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the seven modules that actually ship (the android17-6.18 row is built and held back until a kdir matches its KMI). One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so the link is genuine. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
+| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the seven modules that actually ship (the android17-6.18 row is built and held back until a kdir matches its KMI). One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so modpost checks every import against an export table - the untrimmed one; `lkm-smoke` checks them against what a stock GKI exports. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
+| **the `lkm-smoke` job in `.github/workflows/build.yaml`** | takes each module, ko-loader and `nm` out of the packaged `01_` zip, checks the module's imports against `lkm/kmi-imports/<kmi>.txt` and the GKI's `System.map`, boots Google's GKI build of that KMI (`kernel/prebuilts/<ver>/arm64`, pinned by commit and sha256) under qemu, loads the module and runs `tests/qemu/smoke.py`'s checks. | ~3 min |
 
 There is no dispatch-only "build me a loadable module" workflow. An earlier
 version of this file described one, with `kernel_repo`/`kernel_ref`/`defconfig`
@@ -232,12 +242,19 @@ refuse a 6.12 kernel from a different point release - correctly. That is what
 asks for and pre-resolves the module's undefined symbols out of `/proc/kallsyms`,
 writing each address in as `SHN_ABS`. `simplify_symbols()` only version-checks
 `SHN_UNDEF` symbols, so those per-symbol CRCs are never compared. `ksud insmod`
-does the same two things. Two checks still run first and stay in force: the
-`module_layout` CRC from the module's own `__versions` section, and on 6.6+ the
-size of `struct module`. Past those, loading is a bet on "same KMI => same
+does the same two things. On a stock GKI one of the two is required: plain
+`insmod` stops at the first import outside the KMI symbol list ("Unknown
+symbol", or "Protected symbol" for an unsigned module on 6.6+), and every module
+has some (see `lkm/kmi-imports/`). Two checks still run first and stay in force:
+the `module_layout` CRC from the module's own `__versions` section, and on 6.6+
+the size of `struct module`. CI pins each KMI's own `module_layout` value and
+fails a module that carries another. The android16-6.12 module ships an empty
+`__versions` on purpose - its DDK image computes different CRCs from Google's for
+every symbol - so on 6.12 the kernel compares nothing and logs "no symbol version
+for module_layout". Past those checks, loading is a bet on "same KMI => same
 struct layout", the GKI contract, which is why `module/lkm-load.sh` uses neither
-ko-loader nor `ksud insmod` for a module whose KMI it had to guess. CI fails any
-module that comes out of a MODVERSIONS build with an empty `__versions`. To see what you have:
+ko-loader nor `ksud insmod` for a module whose KMI it had to guess; such a module
+loads only on a kernel that exports everything it imports. To see what you have:
 
 ```
 cat /proc/version      # on the phone
@@ -245,9 +262,11 @@ modinfo nomount-<kmi>.ko | grep vermagic
 ```
 
 If those disagree and ko-loader did not reconcile them, `insmod` refuses the module.
-On a `CONFIG_MODVERSIONS` kernel the refusal is about symbol CRCs (*"disagrees about
-version of symbol ..."*), not the release string, which those kernels do not compare -
-the module declining to enter a kernel whose struct layouts it does not share.
+On a `CONFIG_MODVERSIONS` kernel a CRC refusal (*"disagrees about version of symbol
+..."*) names the symbol, not the release string, which those kernels do not compare.
+It says the CRCs differ, not why: on 6.12 every CRC the DDK image computes differs
+from Google's, struct layouts or not. `boot.log` carries the kernel's line for a
+failed load (`kernel: nomount: ...`).
 
 ### Testing the pathhide guards on a device
 
