@@ -194,8 +194,16 @@ nm_lkm_boot_load() {
     . "$MODDIR/lkm-load.sh" 2>/dev/null || return 0
 
     nm_lkm_probe && return 0
+    # metamount.sh calls this again after post-fs-data.sh. When the module went in but nm
+    # cannot answer (rc 2) the probe fails there too, and every loader would run a second init.
+    _lgid=$(cat "$NM_BOOT_ID" 2>/dev/null)
+    if [ -n "$_lgid" ] && [ "$(cat "$NMDIR/.lkm.boot" 2>/dev/null)" = "$_lgid" ]; then
+        unset _lgid
+        return 0
+    fi
     nm_lkm_load_best "$MODDIR/lkm"
     _lrc=$?
+    case "$_lrc" in 0|2) [ -n "$_lgid" ] && echo "$_lgid" > "$NMDIR/.lkm.boot" 2>/dev/null ;; esac
     if [ "$_lrc" = 0 ]; then
         nmlog "engine module loaded from ${NM_LKM_SOURCE:-?} ($(uname -r))"
         nm_lkm_prune "$MODDIR/lkm"
@@ -207,7 +215,7 @@ nm_lkm_boot_load() {
     elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
         nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
     fi
-    unset _lrc
+    unset _lrc _lgid
 }
 
 nm_fix_shell_tmp() {

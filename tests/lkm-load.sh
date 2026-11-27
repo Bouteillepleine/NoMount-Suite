@@ -437,5 +437,39 @@ check "an unmarked file that is not a NoMount LKM is never touched" \
 	"$([ -f "$WORK/dev/nomount.ko" ] && echo kept || echo aside)" "kept"
 unset -f uname
 
+echo
+echo "the boot load runs the loaders once per boot"
+mkdir -p "$WORK/bl/nm" "$WORK/bl/mod"
+cat > "$WORK/bl/mod/lkm-load.sh" <<'EOF'
+nm_lkm_probe() { return 1; }
+nm_lkm_load_best() { echo load >> "$NMDIR/calls"; NM_LKM_SOURCE=bundled; return "${BL_RC:-2}"; }
+nm_lkm_prune() { :; }
+EOF
+bootload() {
+	(
+		. "$HERE/module/lib.sh"
+		NMDIR="$WORK/bl/nm"; BOOTLOG="$NMDIR/boot.log"; MODDIR="$WORK/bl/mod"
+		NM_BOOT_ID="$WORK/bl/boot_id"
+		nm_set_bin() { BIN=/bin/false; NM_BIN=/bin/false; }
+		nm_lkm_boot_load
+	)
+}
+calls() { grep -c load "$WORK/bl/nm/calls" 2>/dev/null || echo 0; }
+echo "boot-a" > "$WORK/bl/boot_id"
+bootload; bootload
+check "loaded but unconfirmed: the second caller in that boot loads nothing" "$(calls)" "1"
+check "  and does not log that nothing loads" \
+	"$(grep -c 'no engine module loads' "$WORK/bl/nm/boot.log")" "0"
+echo "boot-b" > "$WORK/bl/boot_id"
+bootload
+check "the next boot loads again" "$(calls)" "2"
+# Three boots would trip the guard, which stops the load before it starts.
+rm -f "$WORK/bl/nm/calls" "$WORK/bl/nm/.lkm.boot" "$WORK/bl/nm/bootcount" "$WORK/bl/nm/disabled"
+echo "boot-c" > "$WORK/bl/boot_id"
+BL_RC=1; export BL_RC
+bootload; bootload
+check "nothing went in: the second caller still tries" "$(calls)" "2"
+unset BL_RC
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
