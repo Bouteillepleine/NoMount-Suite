@@ -2305,7 +2305,7 @@ mod tests {
              two calls), so one of the two rule-anchored paths has lost its stripped-form test"
         );
         // The engine's surface to the LKM, pinned against its definitions. lkm/nm_engine.h
-        // declares three functions that hookless/src/nomount.c defines, and the two are in
+        // declares the functions that hookless/src/nomount.c defines, and the two are in
         // different build systems: the module's TUs only ever see the header, the engine's
         // only ever see the definition, and C has no name mangling -- so a signature that
         // drifts still compiles on every board, still links, and first shows up as an
@@ -2320,6 +2320,8 @@ mod tests {
             "bool nm_uid_blocked(uid_t uid)",
             "bool nm_inode_hidden_from_caller(const struct inode *inode)",
             "void vfs_map_meta_override(const struct inode *inode, dev_t *dev, unsigned long *ino)",
+            "bool nm_raw_eof(struct file *filp, loff_t *eof)",
+            "bool nm_raw_bytes(const struct inode *inode, loff_t *bytes)",
         ] {
             assert!(
                 squash(NM_ENGINE_H).contains(decl),

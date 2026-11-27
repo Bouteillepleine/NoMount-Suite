@@ -2,7 +2,7 @@
  *
  * Further down this file #undef's fs_initcall and module_exit and redefines them, so
  * that including the engine generates the nm_lkm_init()/nm_lkm_exit() wrappers that
- * arm the five guards and call nm_module_hide(). The engine then includes
+ * arm the six guards and call nm_module_hide(). The engine then includes
  * <linux/init.h> and <linux/module.h> itself (nomount.c lines 1 and 10) -- AFTER those
  * redefinitions. Where the header had already been pulled in transitively its include
  * guard makes that a no-op and the wrappers survive; where it had not, module.h's own
@@ -26,6 +26,7 @@
 #include "nm_xattr_guard.h"
 #include "nm_mount_filter.h"
 #include "nm_ghost_probes.h"
+#include "nm_size_probes.h"
 #include "nm_pathhide_probes.h"
 #include "nm_hide.h"
 #include "nm_defer.h"
@@ -122,6 +123,7 @@ static int nm_guard_na;
 		NM_GUARD("xattr",    nm_xattr_guard_init());		\
 		NM_GUARD("mount",    nm_mount_filter_init());		\
 		NM_GUARD("ghost",    nm_ghost_probes_init());		\
+		NM_GUARD("size",     nm_size_probes_init());		\
 		NM_GUARD("pathhide", nm_pathhide_probes_init());	\
 		if (!nm_guard_ok)					\
 			pr_err("nomount: NO guard armed - the engine is "\
@@ -150,6 +152,7 @@ static int nm_guard_na;
 	static void __exit nm_lkm_exit(void)				\
 	{								\
 		nm_pathhide_probes_exit();				\
+		nm_size_probes_exit();					\
 		nm_ghost_probes_exit();					\
 		nm_mount_filter_exit();					\
 		nm_xattr_guard_exit();					\

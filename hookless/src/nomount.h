@@ -217,6 +217,9 @@ struct nm_rlist;
 struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
+    /* The size stat last gave for this directory (erofs victims): what a SEEK_END lock
+     * measures from in the out-of-tree module, which cannot hook fs/locks.c. */
+    loff_t eof_seen;
     loff_t real_eof;
     loff_t max_real_pos;
     /* The stock directory's own position space, for a caller served s_path instead of

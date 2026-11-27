@@ -4,7 +4,7 @@
 
 /* The engine's surface to this module, in ONE place.
  *
- * These three functions live in hookless/src/nomount.c and are called from here. They
+ * These functions live in hookless/src/nomount.c and are called from here. They
  * used to be declared by hand, separately, in each .c that wanted one -- nm_uid_blocked()
  * in nm_mount_filter.c, nm_inode_hidden_from_caller() in nm_xattr_guard.c,
  * vfs_map_meta_override() in nm_maps_spoof.c -- which is the one arrangement that cannot
@@ -32,10 +32,13 @@
 #include <linux/types.h>
 
 struct inode;
+struct file;
 
 bool nm_uid_blocked(uid_t uid);
 bool nm_inode_hidden_from_caller(const struct inode *inode);
 void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
 			   unsigned long *ino);
+bool nm_raw_eof(struct file *filp, loff_t *eof);
+bool nm_raw_bytes(const struct inode *inode, loff_t *bytes);
 
 #endif /* _NM_ENGINE_H */

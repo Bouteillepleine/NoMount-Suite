@@ -2986,6 +2986,8 @@ out:
         i_size_write(inode, stat->size);
         spin_unlock(&inode->i_lock);
     }
+    if (!res && d && S_ISDIR(inode->i_mode) && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+        WRITE_ONCE(d->eof_seen, stat->size);
     if (d) nm_dir_node_put(d);
     return res;
 }
@@ -8535,6 +8537,53 @@ loff_t nm_fioqsize_bytes(struct file *filp, struct inode *inode)
     if (unlikely(!filp || !inode))
         return inode ? inode_get_bytes(inode) : 0;
     return nm_stat_for_raw_reader(filp, &st) ? (loff_t)st.blocks << 9 : inode_get_bytes(inode);
+}
+#endif
+
+#ifdef NM_OOT_COMPANION_STUBS
+/* The out-of-tree answers for those two readers, called from kprobe handlers in
+ * lkm/nm_size_probes.c: nothing here sleeps. A replaced file's size is the file this caller
+ * is served, as for FIONREAD; a directory it took over on erofs, the size stat last gave
+ * (nm_dir_iops and overlay directories keep i_size there themselves). */
+bool nm_raw_eof(struct file *filp, loff_t *eof);
+bool nm_raw_eof(struct file *filp, loff_t *eof)
+{
+    struct inode *inode = file_inode(filp);
+    struct nomount_dir_node *d;
+    struct nm_iop *iop;
+
+    if (inode->i_op == &nm_file_iops) {
+        if (!S_ISREG(inode->i_mode))
+            return false;
+        *eof = nm_fionread_isize(filp, inode);
+        return *eof != i_size_read(inode);
+    }
+    if (!S_ISDIR(inode->i_mode) || inode->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
+        return false;
+    rcu_read_lock();
+    iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop,
+                   getattr, nomount_hijacked_getattr);
+    d = iop ? smp_load_acquire(&iop->dir_node) : NULL;
+    *eof = d ? READ_ONCE(d->eof_seen) : 0;
+    rcu_read_unlock();
+    return *eof > 0 && *eof != i_size_read(inode);
+}
+
+/* FIOQSIZE's inode_get_bytes() for a caller served the stock file: the stock file's bytes. */
+bool nm_raw_bytes(const struct inode *inode, loff_t *bytes);
+bool nm_raw_bytes(const struct inode *inode, loff_t *bytes)
+{
+    struct path *stock;
+    struct inode *si;
+
+    if (inode->i_op != &nm_file_iops || !S_ISREG(inode->i_mode))
+        return false;
+    stock = nm_stock_for_caller(inode->i_private);
+    si = stock ? d_backing_inode(stock->dentry) : NULL;
+    if (!si)
+        return false;
+    *bytes = ((loff_t)si->i_blocks << 9) + si->i_bytes;
+    return true;
 }
 #endif
 
