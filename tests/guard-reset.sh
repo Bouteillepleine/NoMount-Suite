@@ -86,6 +86,20 @@ fresh; nm_incident_no_entry
 check "with no record, it writes its own" "$(grep -c '^reason=no boot entry point' "$NMDIR/incident.log")" "1"
 echo "reason=engine did not run: x" > "$NMDIR/incident.log"; nm_incident_no_entry
 check "  and replaces one that is not a guard record" "$(grep -c '^reason=no boot entry point' "$NMDIR/incident.log")" "1"
+
+echo
+echo "the guard's card on Magisk"
+if command -v ksud >/dev/null 2>&1 || command -v apd >/dev/null 2>&1; then
+	echo "  skip: a root manager's CLI is on this host's PATH"
+else
+	printf 'id=meta-nomount\ndescription=old\n' > "$MODDIR/module.prop"
+	BIN=/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount
+	( APATCH=""; nm_card "⛔ disabled - bootloop guard tripped, see the WebUI" )
+	check "names a command Magisk's root shell can run" \
+		"$(sed -n 's/^description=//p' "$MODDIR/module.prop")" \
+		"⛔ disabled - bootloop guard tripped, run $BIN check"
+	echo 'version=vtest' > "$MODDIR/module.prop"
+fi
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

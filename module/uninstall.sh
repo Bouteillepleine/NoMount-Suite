@@ -34,11 +34,13 @@ _nmlog() {
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
-# This runs inside the boot sequence when a `remove` flag is set, and on every upgrade.
-# An engine that blocks on the netlink socket (proto 29 is SELinux-gated, so a denial can
-# read as a stall rather than an error) hangs that stage with nothing on the console to
-# say why. lib.sh is deliberately not sourced here -- this has to work when the module
-# tree is half-gone -- so nmto's shape is reproduced locally.
+# This runs inside the boot sequence when a `remove` flag is set. KernelSU's ksud does not
+# run it on an upgrade (it renames the new module directory into place), so the stash branch
+# below is reached only on a manager that does. An engine that blocks on the netlink socket
+# (proto 29 is SELinux-gated, so a denial can read as a stall rather than an error) hangs
+# that stage with nothing on the console to say why. lib.sh is deliberately not sourced
+# here -- this has to work when the module tree is half-gone -- so nmto's shape is
+# reproduced locally.
 _nmto() {
     _t=$1
     shift

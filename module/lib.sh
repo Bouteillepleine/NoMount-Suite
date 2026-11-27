@@ -64,8 +64,9 @@ nm_card() {
         return
     fi
     _cd=$1
+    # Magisk: no WebUI, and service.sh links nomount onto PATH only for KernelSU and APatch.
     if [ -z "$APATCH" ] && ! command -v apd >/dev/null 2>&1; then
-        _cd=$(printf '%s' "$_cd" | sed 's/tap Reload in the WebUI/run nomount reload/; s/see the WebUI/run nomount check/')
+        _cd=$(printf '%s' "$_cd" | sed "s|tap Reload in the WebUI|run ${BIN:-nomount} reload|; s|see the WebUI|run ${BIN:-nomount} check|")
     fi
     _cp="$MODDIR/module.prop"
     [ -f "$_cp" ] || return 1

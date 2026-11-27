@@ -46,8 +46,9 @@ the commands below from a root shell.
 
 ## Safe Guard boot
 
-Let it boot twice more: after three failed boots the Suite parks itself. To
-park it by hand from recovery:
+Let it boot twice more: after two failed boots the third comes up parked, with
+nothing injected. A system_server crash loop inside one boot (four starts before
+the boot completes) parks it on that boot. To park it by hand from recovery:
 
 ```sh
 mkdir -p /data/adb/nomount && touch /data/adb/nomount/disabled
