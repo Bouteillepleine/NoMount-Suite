@@ -1175,8 +1175,9 @@ static void nomount_hijacked_evict_inode(struct inode *inode)
 
 /* A caller an added name is hidden from never reaches it by name: revalidate refuses the
  * walk. What reaches the inode's ops is a handle it got while served (an fd from zygote or a
- * provider, a cwd), and stock answers every read through a live handle. So metadata reads
- * answer as served; open, permission and the writes still refuse. */
+ * provider, a cwd), and stock answers every read through a live handle. So stat, statfs,
+ * readlink and the file flags answer as served. open, permission and the writes still refuse,
+ * and so do xattrs: security.* is the LSM's to answer, and only the xattr guard stops it. */
 static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *info)
 {
     return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) && !nm_info_served(info);
@@ -1837,6 +1838,7 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     struct path *stock;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     stock = nm_stock_for_caller(info);
     if (unlikely(stock)) {
         struct inode *si = d_backing_inode(stock->dentry);
@@ -3624,6 +3626,7 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         int r;
 
         if (unlikely(!info)) return -ENODATA;
+        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
         stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             full = nm_full_xattr_name(proxy, name, &alloc);
@@ -4556,7 +4559,7 @@ static int nm_ovl_engine_fh(struct inode *inode, u32 *fh, int *max_len,
 
     if (!IS_RDONLY(inode))
         return FILEID_INVALID;
-    d = d_find_any_alias(inode);
+    d = d_find_alias(inode);
     for (i = 0; d && i < 16; i++) {
         p = dget_parent(d);
         dput(d);
@@ -8312,15 +8315,14 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
     *ino = info->v_ino;
 }
 
-/* The fs/xattr.c hook. security.* is answered by the LSM before any handler of ours, so it
- * refused a hidden caller there; that caller now only reaches the inode through a handle it
- * got while served, and reads through one answer as served (see nm_hidden_from_caller()).
- * Kept because the integration patch calls it. */
 bool nm_inode_hidden_from_caller(const struct inode *inode);
 bool nm_inode_hidden_from_caller(const struct inode *inode)
 {
-    (void)inode;
-    return false;
+    if (unlikely(!inode))
+        return false;
+    if (inode->i_op != &nm_file_iops && inode->i_op != &nm_dir_iops)
+        return false;
+    return nm_hidden_from_caller(inode->i_private);
 }
 
 /* The fs/ioctl.c FIONREAD hook (hookless/patches/nomount_fionread_*.patch). FIONREAD answers
@@ -8349,7 +8351,10 @@ loff_t nm_fionread_isize(struct file *filp, struct inode *inode)
     return i_size_read(file_inode(real));
 }
 
-/* An engine inode or a hijacked directory, whose i_size and i_blocks are not what stat
+#ifndef NM_OOT_COMPANION_STUBS
+/* The in-tree size hooks; the out-of-tree module has nowhere to call them from.
+ *
+ * An engine inode or a hijacked directory, whose i_size and i_blocks are not what stat
  * tells this caller. */
 static bool nm_stat_for_raw_reader(struct file *filp, struct kstat *st)
 {
@@ -8387,6 +8392,7 @@ loff_t nm_fioqsize_bytes(struct file *filp, struct inode *inode)
         return inode ? inode_get_bytes(inode) : 0;
     return nm_stat_for_raw_reader(filp, &st) ? (loff_t)st.blocks << 9 : inode_get_bytes(inode);
 }
+#endif
 
 static void __exit nomount_exit(void)
 {
