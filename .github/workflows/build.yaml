@@ -608,3 +608,115 @@ jobs:
             release/debug/00_NoMount-Module-*.zip
             release/debug/01_NoMount-Module-LKM-*.zip
           retention-days: 7
+
+  # Every shipped engine module, loaded as a phone loads it - ko-loader, on Google's own GKI
+  # build of its KMI - and then driven like the built-in engine in hookless-matrix's smoke
+  # job. Before this no job ran a line of module code: v1.3.207-217's CFI panic at init on
+  # 5.10 and v1.3.218's module_layout refusal on 6.12 both passed every gate there was, and
+  # both fail here.
+  #
+  # Kernels: kernel/prebuilts/<ver>/arm64 at a pinned commit, each chosen because its
+  # module_layout CRC equals the kmi-modules row's `layout`. gitiles serves a blob base64;
+  # the decoded file is checked against the sha256 below. To move one, pick the commit, then
+  #   curl -s "https://android.googlesource.com/kernel/prebuilts/<ver>/arm64/+/<commit>/<file>?format=TEXT" | base64 -d | sha256sum
+  # for kernel-<ver>-gz and System.map, and regenerate lkm/kmi-imports/<kmi>.txt against it.
+  lkm-smoke:
+    name: load ${{ matrix.kmi }} on stock GKI
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # cpu: android12-5.10 (5.10.43) hangs before its first printk on -cpu max under QEMU 8.2.
+          - { kmi: android12-5.10, ver: '5.10', commit: 1fed4637da5cecd8b1a8239cb37bf75c7a66662d, build: 7618735, cpu: cortex-a76,
+              kernel: 50f1125700a94fb4be111afea35e78a0a0e9e019a75c1bbd2686e3f4967c2514, map: 69613d6f10fb008ae92c4924af26acacc101be20fa68ad9e7010e8309d075949 }
+          - { kmi: android13-5.10, ver: '5.10', commit: 1713dddcaf77d5cd24f799860f7edd3585a35104, build: 8732768, cpu: 'max,pauth-impdef=on',
+              kernel: c3b70949a413ca3e13154dd9ee65708a8d038946907558d6d4dd07203a56fdc4, map: a85fc9557aceb2d8f6d52d5b53f228ac39c3e5aa0a0c2dc11b9186a7d0b00345 }
+          - { kmi: android13-5.15, ver: '5.15', commit: 14073565133eba4ef2508fa7b4e15725f1a39c39, build: 8747247, cpu: 'max,pauth-impdef=on',
+              kernel: 2c8b6017727e87d1b174e81ea737402a644b5b50f52d946a59350f941216c9f6, map: fe2a2d005d47822396bede7a02c6dded648d8b06cb56cb5f3678b06f7af7b6e2 }
+          - { kmi: android14-5.15, ver: '5.15', commit: 8779cf3f490111bc8a4e133a0be52557cfa0ccba, build: 10681427, cpu: 'max,pauth-impdef=on',
+              kernel: 11d70b5b8d55826fce64b91ec0d65c0b8546426b83cff8ced3f90f376f3fd23b, map: 106494fb326e3c887fedee8140a6a83fb29d08b0c6a2f60fd672e9a814fc2b1d }
+          - { kmi: android14-6.1, ver: '6.1', commit: bfb3baed33d4497416d6f77fc015d71f726b838d, build: 14867025, cpu: 'max,pauth-impdef=on',
+              kernel: 95f13c18906a0cc754efe84bba17416c410616a60936d7b331ab726bff0129bc, map: 48c09e74f841863ee21e95ef1095c925099fee5e5452c35d2de43a774d929499 }
+          - { kmi: android15-6.6, ver: '6.6', commit: 350899556b7cae26d5981c7055759428aef7598d, build: 14880967, cpu: 'max,pauth-impdef=on',
+              kernel: 1b38f400616f07b0f5f69b7e5acc5ff99259fca762bc2c4bcaa1245fccece153, map: c8ad13a572a182a2cfa4f5c56788b4f8d7606676673280fe35be390a77fbb6b3 }
+          - { kmi: android16-6.12, ver: '6.12', commit: 318576752b27af3d328e6deb5e6aa29b08f762c9, build: 15076761, cpu: 'max,pauth-impdef=on',
+              kernel: 04a379153f2939f33ebbd5ef63dd4f24f9027130b7fb7bfeb6e2b85fde5355ea, map: c8e8e71c197222c117bb798156e69315dcba1a69f00d62d808e334c3128177c8 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install qemu and the arm64 toolchain
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm erofs-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          qemu-system-aarch64 --version | head -1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nomount-release-zip
+          path: dist
+
+      - name: Take the module, ko-loader and nm out of the 01_ zip
+        env:
+          KMI: ${{ matrix.kmi }}
+          ROWS: ${{ strategy.job-total }}
+        run: |
+          set -eu
+          set -- dist/01_NoMount-Module-LKM-*.zip
+          [ "$#" = 1 ] && [ -f "$1" ] || { echo "::error::want one 01_ release zip in dist/, found: $*"; exit 1; }
+          Z="$RUNNER_TEMP/z"; mkdir -p "$Z"
+          unzip -q "$1" 'lkm/*' loader bin/arm64-v8a/nm -d "$Z"
+          for f in "lkm/nomount-$KMI.ko" loader bin/arm64-v8a/nm; do
+            [ -s "$Z/$f" ] || { echo "::error::$1 has no $f"; exit 1; }
+          done
+          # One row per shipped module: rows are distinct KMIs and each found its own, so
+          # equal counts mean none ships untested.
+          n=$(find "$Z/lkm" -name 'nomount-*.ko' | wc -l)
+          [ "$n" = "$ROWS" ] || {
+            echo "::error::the 01_ zip ships $n engine modules and this job has $ROWS rows - add a row for the new KMI"
+            exit 1; }
+
+      - name: Fetch the pinned GKI kernel and System.map
+        env:
+          VER: ${{ matrix.ver }}
+          COMMIT: ${{ matrix.commit }}
+          KSHA: ${{ matrix.kernel }}
+          MSHA: ${{ matrix.map }}
+        run: |
+          set -euo pipefail
+          G="$RUNNER_TEMP/gki"; mkdir -p "$G"; cd "$G"
+          base="https://android.googlesource.com/kernel/prebuilts/$VER/arm64/+/$COMMIT"
+          for f in "kernel-$VER-gz" System.map; do
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "$base/$f?format=TEXT" | base64 -d > "$f"
+          done
+          printf '%s  %s\n%s  %s\n' "$KSHA" "kernel-$VER-gz" "$MSHA" System.map | sha256sum -c -
+          gunzip -c "kernel-$VER-gz" > Image
+          grep -aom1 'Linux version [0-9][^ ]*' Image
+
+      - name: Imports a stock GKI does not export are the reviewed list
+        env:
+          KMI: ${{ matrix.kmi }}
+        run: python3 -I scripts/kmi-imports.py "$RUNNER_TEMP/z/lkm/nomount-$KMI.ko" "$RUNNER_TEMP/gki/System.map" "lkm/kmi-imports/$KMI.txt"
+
+      - name: Boot the GKI, load the module, run the checks
+        env:
+          KMI: ${{ matrix.kmi }}
+          CPU: ${{ matrix.cpu }}
+        run: |
+          set -eu
+          Z="$RUNNER_TEMP/z"
+          python3 -I tests/qemu/smoke.py --mode lkm --cpu "$CPU" --kernel "$RUNNER_TEMP/gki/Image" \
+            --nm "$Z/bin/arm64-v8a/nm" --ko "$Z/lkm/nomount-$KMI.ko" --loader "$Z/loader" \
+            --log "$RUNNER_TEMP/smoke-console.log"
+
+      - name: Upload the console log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-console-${{ matrix.kmi }}
+          path: ${{ runner.temp }}/smoke-console.log
+          if-no-files-found: ignore

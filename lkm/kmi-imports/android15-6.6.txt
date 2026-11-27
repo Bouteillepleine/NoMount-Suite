@@ -1,0 +1,13 @@
+# android15-6.6: imports a stock GKI does not export (kernel/prebuilts/6.6/arm64 at 350899556b7c, build 14880967).
+# ko-loader and ksud insmod bind these from /proc/kallsyms; plain insmod cannot load the module.
+# scripts/kmi-imports.py fails the lkm-smoke job when this list and the module disagree.
+free_inode_nonrcu
+generic_file_llseek_size
+mnt_drop_write
+mnt_want_write
+netlink_rcv_skb
+security_inode_getsecctx
+security_inode_notifysecctx
+thp_get_unmapped_area
+vfs_getxattr
+vfs_setxattr

@@ -1,0 +1,36 @@
+# android13-5.15: imports a stock GKI does not export (kernel/prebuilts/5.15/arm64 at 14073565133e, build 8747247).
+# ko-loader and ksud insmod bind these from /proc/kallsyms; plain insmod cannot load the module.
+# scripts/kmi-imports.py fails the lkm-smoke job when this list and the module disagree.
+__netlink_dump_start
+__put_cred
+d_drop
+d_lookup
+dentry_open
+dentry_path_raw
+free_inode_nonrcu
+generic_file_llseek_size
+generic_file_readonly_mmap
+generic_permission
+iov_iter_alignment
+lookup_one_len_unlocked
+mnt_drop_write
+mnt_want_write
+netlink_capable
+netlink_rcv_skb
+notify_change
+override_creds
+path_get
+percpu_counter_batch
+prepare_creds
+radix_tree_tagged
+revert_creds
+security_inode_getsecctx
+security_inode_notifysecctx
+security_release_secctx
+shrink_dcache_sb
+static_key_enable
+thp_get_unmapped_area
+vfs_getattr_nosec
+vfs_getxattr
+vfs_setpos
+vfs_setxattr
