@@ -454,6 +454,8 @@ elif [ -x "$BIN" ]; then
     esac
     if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then
         _health="⛔ mount pass never ran - see the WebUI"
+    elif [ "$(_health_get engine)" = "down" ] && nm_lkm_zip; then
+        _health="⛔ engine module did not load on this kernel - see the WebUI"
     elif [ "$(_health_get engine)" = "down" ]; then
         _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
     elif [ "${_rl_rc:-0}" -ne 0 ]; then

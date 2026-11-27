@@ -99,6 +99,8 @@ nm_notify_mounted
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
         _desc="⛔ disabled - bootloop guard tripped, see the WebUI"
+    elif [ "${_driver_ok:-1}" = 0 ] && nm_lkm_zip; then
+        _desc="⛔ engine module did not load on this kernel - see the WebUI"
     elif [ "${_driver_ok:-1}" = 0 ]; then
         _desc="⛔ no NoMount driver - flash a NoMount kernel and reboot"
     elif [ "$_pass_ran" = 0 ]; then

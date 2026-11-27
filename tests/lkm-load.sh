@@ -471,5 +471,12 @@ bootload; bootload
 check "nothing went in: the second caller still tries" "$(calls)" "2"
 unset BL_RC
 
+# The cards tell an LKM user whose module did not load to flash a kernel unless this answers.
+lkmzip() { ( . "$HERE/module/lib.sh"; MODDIR="$WORK/bl/mod"; nm_lkm_zip && echo lkm || echo lite ); }
+echo 'updateJson=https://example.invalid/main/update-lkm.json' > "$WORK/bl/mod/module.prop"
+check "the LKM zip is told apart for the cards" "$(lkmzip)" "lkm"
+echo 'updateJson=https://example.invalid/main/update.json' > "$WORK/bl/mod/module.prop"
+check "  and the lite zip is not" "$(lkmzip)" "lite"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
