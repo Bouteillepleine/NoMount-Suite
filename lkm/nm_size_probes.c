@@ -146,7 +146,7 @@ static int nm_sp_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct nm_sp_fionread_ctx *ctx = (struct nm_sp_fionread_ctx *)ri->data;
 	struct file *f;
 	loff_t eof;
-	int v;
+	int v, err;
 
 	if (regs_return_value(regs) != 0)
 		return 0;
@@ -155,17 +155,14 @@ static int nm_sp_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 	if (S_ISREG(file_inode(f)->i_mode) && nm_raw_eof(f, &eof)) {
 		v = (int)(eof - f->f_pos);
-		/* The kernel's put_user() just touched this word, so it is mapped; if it is gone
-		 * now, the kernel's own answer stays. Not copy_to_user_nofault(): the GKI does
-		 * not export it, and this inline form needs only what copy_to_user() already does. */
-		if (access_ok(ctx->uptr, sizeof(v))) {
-			unsigned long left;
-
-			pagefault_disable();
-			left = __copy_to_user_inatomic(ctx->uptr, &v, sizeof(v));
-			pagefault_enable();
-			(void)left;
-		}
+		/* The kernel's put_user() just touched this word, so it is mapped; with faults
+		 * off a vanished page fails instead of sleeping, and the kernel's answer stays.
+		 * put_user() is inline on every version and imports nothing, unlike
+		 * copy_to_user_nofault() (not exported by GKI) and __arch_copy_to_user(). */
+		pagefault_disable();
+		err = put_user(v, ctx->uptr);
+		pagefault_enable();
+		(void)err;
 	}
 	fput(f);
 	return 0;
