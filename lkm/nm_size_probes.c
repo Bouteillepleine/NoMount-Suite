@@ -155,9 +155,17 @@ static int nm_sp_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 	if (S_ISREG(file_inode(f)->i_mode) && nm_raw_eof(f, &eof)) {
 		v = (int)(eof - f->f_pos);
-		/* The kernel's put_user() just touched this word; if it is gone now, its own
-		 * answer stays. */
-		copy_to_user_nofault(ctx->uptr, &v, sizeof(v));
+		/* The kernel's put_user() just touched this word, so it is mapped; if it is gone
+		 * now, the kernel's own answer stays. Not copy_to_user_nofault(): the GKI does
+		 * not export it, and this inline form needs only what copy_to_user() already does. */
+		if (access_ok(ctx->uptr, sizeof(v))) {
+			unsigned long left;
+
+			pagefault_disable();
+			left = __copy_to_user_inatomic(ctx->uptr, &v, sizeof(v));
+			pagefault_enable();
+			(void)left;
+		}
 	}
 	fput(f);
 	return 0;
