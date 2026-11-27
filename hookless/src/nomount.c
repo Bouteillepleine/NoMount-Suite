@@ -1164,6 +1164,17 @@ static __always_inline struct path *nm_stock_for_caller(struct nm_inode_info *in
     return nm_info_served(info) ? NULL : &info->s_path;
 }
 
+#ifdef FMODE_NOWAIT
+#define NM_FMODE_NOWAIT_ FMODE_NOWAIT
+#else
+#define NM_FMODE_NOWAIT_ 0
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#define NM_FMODE_FROM_REAL (NM_FMODE_NOWAIT_ | FMODE_CAN_ODIRECT)
+#else
+#define NM_FMODE_FROM_REAL NM_FMODE_NOWAIT_
+#endif
+
 static int nm_open(struct inode *inode, struct file *file)
 {
     struct nm_inode_info *info = inode->i_private;
@@ -1178,6 +1189,9 @@ static int nm_open(struct inode *inode, struct file *file)
             if (IS_ERR(real_file)) return PTR_ERR(real_file);
             file->private_data = real_file;
             file->f_mapping = real_file->f_mapping;
+            /* This caller reads the stock file: it gets that file's NOWAIT and O_DIRECT
+             * answers, not the engine table's (engine-oracles-3). */
+            file->f_mode |= real_file->f_mode & NM_FMODE_FROM_REAL;
             return 0;
         }
     }
@@ -1201,6 +1215,11 @@ static int nm_open(struct inode *inode, struct file *file)
     }
 
     file->private_data = real_file;
+#ifdef FMODE_NOWAIT
+    /* RWF_NOWAIT is refused on the outer file's f_mode before it reaches nm_read_iter. */
+    if (S_ISREG(inode->i_mode) && (info->v_cap & NM_CAP_NOWAIT))
+        file->f_mode |= real_file->f_mode & FMODE_NOWAIT;
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     if (unlikely(info->v_cap & NM_CAP_ODIRECT))
         file->f_mode |= FMODE_CAN_ODIRECT;
@@ -1320,11 +1339,26 @@ static ssize_t nm_forward_iter(struct kiocb *iocb, struct iov_iter *iter,
     return ret;
 }
 
+#ifdef FOP_DONTCACHE
+static bool nm_takes_dontcache(struct file *file, struct file *real_file)
+{
+    struct nm_inode_info *info = file_inode(file)->i_private;
+
+    return (real_file->f_op->fop_flags & FOP_DONTCACHE) && info &&
+           (info->v_cap & (NM_CAP_KNOWN | NM_CAP_DONTCACHE)) == (NM_CAP_KNOWN | NM_CAP_DONTCACHE);
+}
+#endif
+
 static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
     struct file *real_file = iocb->ki_filp->private_data;
 
     if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
+#ifdef FOP_DONTCACHE
+    /* The tables take RWF_DONTCACHE so f2fs victims answer like stock; others refuse here. */
+    if (unlikely(iocb->ki_flags & IOCB_DONTCACHE) && !nm_takes_dontcache(iocb->ki_filp, real_file))
+        return -EOPNOTSUPP;
+#endif
     if (unlikely(iocb->ki_flags & IOCB_DIRECT)) {
         struct inode *vi = file_inode(iocb->ki_filp);
 
@@ -1348,6 +1382,10 @@ static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
     struct file *real_file = iocb->ki_filp->private_data;
 
     if (!real_file || !real_file->f_op->write_iter) return -EINVAL;
+#ifdef FOP_DONTCACHE
+    if (unlikely(iocb->ki_flags & IOCB_DONTCACHE) && !nm_takes_dontcache(iocb->ki_filp, real_file))
+        return -EOPNOTSUPP;
+#endif
     return nm_forward_iter(iocb, from, real_file, true);
 }
 
@@ -1582,18 +1620,30 @@ static u8 nm_stock_caps(struct inode *ino)
 #endif
                       ))
         cap |= NM_CAP_IOCTL;
+#ifdef FOP_DONTCACHE
+    if (ino->i_fop && (ino->i_fop->fop_flags & FOP_DONTCACHE)) cap |= NM_CAP_DONTCACHE;
+#endif
     return cap;
 }
 
-static bool nm_stock_takes_odirect(struct path *p)
+/* What the stock file's own ->open grants: O_DIRECT, and FMODE_NOWAIT (f2fs, ext4). */
+static u8 nm_stock_open_caps(struct path *p)
 {
     struct file *f;
+    u8 cap = 0;
 
-    if (!p || !p->dentry) return false;
+    if (!p || !p->dentry) return 0;
     f = dentry_open(p, O_RDONLY | O_DIRECT | O_LARGEFILE, current_cred());
-    if (IS_ERR(f)) return false;
+    if (!IS_ERR(f))
+        cap |= NM_CAP_ODIRECT;
+    else if (d_is_reg(p->dentry))
+        f = dentry_open(p, O_RDONLY | O_LARGEFILE, current_cred());
+    if (IS_ERR(f)) return cap;
+#ifdef FMODE_NOWAIT
+    if (f->f_mode & FMODE_NOWAIT) cap |= NM_CAP_NOWAIT;
+#endif
     fput(f);
-    return true;
+    return cap;
 }
 
 static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
@@ -3683,9 +3733,16 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     return nm_reval_stale(dentry);
 }
 
+#ifdef FOP_DONTCACHE
+#define NM_FOP_FLAGS .fop_flags = FOP_DONTCACHE,
+#else
+#define NM_FOP_FLAGS
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 static const struct file_operations nm_file_fops_mmap_prepare = {
     .owner = THIS_MODULE,
+    NM_FOP_FLAGS
     .llseek = nm_llseek,
     .open = nm_open,
     .release = nm_release,
@@ -3704,6 +3761,7 @@ static const struct file_operations nm_file_fops_mmap_prepare = {
 
 static const struct file_operations nm_file_fops_mmap_prepare_thp = {
     .owner = THIS_MODULE,
+    NM_FOP_FLAGS
     .llseek = nm_llseek,
     .open = nm_open,
     .release = nm_release,
@@ -3724,6 +3782,7 @@ static const struct file_operations nm_file_fops_mmap_prepare_thp = {
 
 static const struct file_operations nm_file_fops_thp = {
     .owner = THIS_MODULE,
+    NM_FOP_FLAGS
     .llseek = nm_llseek,
     .open = nm_open,
     .release = nm_release,
@@ -3743,6 +3802,7 @@ static const struct file_operations nm_file_fops_thp = {
 
 static const struct file_operations nm_file_fops = {
     .owner = THIS_MODULE,
+    NM_FOP_FLAGS
     .llseek = nm_llseek,
     .open = nm_open,
     .release = nm_release,
@@ -6266,10 +6326,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_ctx_len = 0;
                 if (v_inode->i_op != &nm_file_iops && v_inode->i_op != &nm_dir_iops)
                 {
-                    anc_cap = nm_stock_caps(v_inode);
                     /* erofs directories take O_DIRECT (noop_direct_IO); overlay ones do not. */
-                    if (nm_stock_takes_odirect(&p_path))
-                        anc_cap |= NM_CAP_ODIRECT;
+                    anc_cap = nm_stock_caps(v_inode) | nm_stock_open_caps(&p_path);
                     nm_fa_sample_path(&p_path, &anc_fa);
                 }
 #ifdef OVERLAYFS_SUPER_MAGIC
@@ -6668,9 +6726,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                     if (nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
                         fctxlen = 0;
                     fmapdev = nm_stock_map_dev(fp.dentry);
-                    fcap = nm_stock_caps(d_backing_inode(fp.dentry));
-                    if (nm_stock_takes_odirect(&fp))
-                        fcap |= NM_CAP_ODIRECT;
+                    fcap = nm_stock_caps(d_backing_inode(fp.dentry)) | nm_stock_open_caps(&fp);
                     nm_fa_sample_path(&fp, &ffa);
                 }
                 path_put(&fp);
@@ -6923,9 +6979,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                 struct inode *ci = d_backing_inode(v_path_struct.dentry);
 
                 if (ci && ci->i_op != &nm_file_iops && ci->i_op != &nm_dir_iops) {
-                    rule->v_cap = nm_stock_caps(ci);
-                    if (nm_stock_takes_odirect(&v_path_struct))
-                        rule->v_cap |= NM_CAP_ODIRECT;
+                    rule->v_cap = nm_stock_caps(ci) | nm_stock_open_caps(&v_path_struct);
                 }
             }
         } else {

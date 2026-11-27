@@ -56,6 +56,8 @@
 #define NM_CAP_ODIRECT      (1 << 1)
 #define NM_CAP_THPMAP       (1 << 2)
 #define NM_CAP_IOCTL        (1 << 3)
+#define NM_CAP_NOWAIT       (1 << 4)
+#define NM_CAP_DONTCACHE    (1 << 5)
 #define NM_CAP_KNOWN        (1 << 7)
 
 #define NM_LOG_TAG "NoMount: "
