@@ -186,6 +186,9 @@ struct nm_inode_info {
     u32 gen;
     struct nm_dsnap *dsnap;
     spinlock_t dsnap_lock;
+    u32 v_fh_state;             /* 2: v_fh holds the overlay handle template */
+    u8 v_fh_len, v_fh_type;
+    u8 v_fh[40];
     struct rcu_head rcu;
 };
 

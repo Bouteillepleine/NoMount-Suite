@@ -4543,51 +4543,123 @@ static struct inode *nm_shadowed_inode(struct inode *inode)
 #define NM_OVL_FILEID_V1            0xf8
 #define NM_OVL_FB_HDR               21  /* version, magic, len, flags, type, uuid */
 
-/* A pure injection on a read-only overlay over erofs has no lower inode to encode, and
- * FILEID_INVALID leaves the handle out of inotify fdinfo where every stock sibling prints
- * one. Encode the nearest real ancestor through overlay's own encoder, so the header, the
- * flags and the layer uuid are stock's, and give the inner erofs fid a nid of our own.
- * Read-only only: with an upper layer the encoder may copy the ancestor up. */
-static int nm_ovl_engine_fh(struct inode *inode, u32 *fh, int *max_len,
-                            const struct export_operations *orig)
-{
-    struct dentry *d, *p;
-    struct inode *anc = NULL;
-    u8 *b = (u8 *)fh;
-    int i, o, ret, room = *max_len;
-    u64 nid;
+#define NM_OVL_FH_MAX               40
 
-    if (!IS_RDONLY(inode))
-        return FILEID_INVALID;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+#define nm_for_each_child(c, p) hlist_for_each_entry(c, &(p)->d_children, d_sib)
+#else
+#define nm_for_each_child(c, p) list_for_each_entry(c, &(p)->d_subdirs, d_child)
+#endif
+
+/* A cached child of @parent that the engine did not make, referenced. */
+static struct dentry *nm_stock_child(struct dentry *parent)
+{
+    struct dentry *c, *found = NULL;
+
+    spin_lock(&parent->d_lock);
+    nm_for_each_child(c, parent) {
+        spin_lock_nested(&c->d_lock, DENTRY_D_LOCK_NESTED);
+        if (c->d_inode && c->d_inode->i_sb == parent->d_sb && !nm_is_own_inode(c->d_inode) &&
+            !d_unhashed(c)) {
+            dget_dlock(c);
+            found = c;
+        }
+        spin_unlock(&c->d_lock);
+        if (found)
+            break;
+    }
+    spin_unlock(&parent->d_lock);
+    return found;
+}
+
+/* A stock handle to copy: a real child of the directory the engine's own path starts in,
+ * so the layer uuid is one its stock siblings carry (the directory itself sits in the
+ * layer it originates from, which no stock child of /product/priv-app shares), else that
+ * directory. Returns the encoder's type, the handle's length in @len, and in @kept whether
+ * it came from a child (worth keeping: the directory is only a stand-in until one is cached). */
+static int nm_ovl_template(struct inode *inode, u32 *tpl, int *len, bool *kept,
+                           const struct export_operations *orig)
+{
+    struct dentry *d, *p, *c = NULL;
+    u8 *b = (u8 *)tpl;
+    int i, o, ret = FILEID_INVALID, l = NM_OVL_FH_MAX / 4;
+
     d = d_find_alias(inode);
     for (i = 0; d && i < 16; i++) {
         p = dget_parent(d);
         dput(d);
         d = p;
-        if (d->d_inode && d->d_inode->i_sb == inode->i_sb && !nm_is_own_inode(d->d_inode)) {
-            anc = igrab(d->d_inode);
+        if (d->d_inode && d->d_inode->i_sb == inode->i_sb && !nm_is_own_inode(d->d_inode))
             break;
+        if (IS_ROOT(d)) {
+            dput(d);
+            d = NULL;
         }
-        if (IS_ROOT(d))
-            break;
     }
-    dput(d);
-    if (!anc)
+    if (!d || i == 16 || nm_is_own_inode(d->d_inode)) {
+        dput(d);
         return FILEID_INVALID;
-    ret = orig->encode_fh(anc, fh, max_len, NULL);
-    iput(anc);
+    }
+    c = nm_stock_child(d);
+    *kept = c != NULL;
+    ret = orig->encode_fh(d_inode(c ? c : d), tpl, &l, NULL);
+    dput(c);
+    dput(d);
     o = ret == NM_OVL_FILEID_V1 ? 3 : ret == NM_OVL_FILEID_V0 ? 0 : -1;
-    if (o < 0 || *max_len > room || (int)*max_len * 4 < o + NM_OVL_FB_HDR + 12 ||
+    if (o < 0 || l > NM_OVL_FH_MAX / 4 || l * 4 < o + NM_OVL_FB_HDR + 12 ||
         b[o] != 0 || b[o + 1] != 0xfb || b[o + 2] != NM_OVL_FB_HDR + 12 ||
         b[o + 4] != NM_FILEID_INO64_GEN)
         return FILEID_INVALID;
-    o += NM_OVL_FB_HDR;
+    *len = o + b[o + 2];
+    return ret;
+}
+
+/* A pure injection on a read-only overlay over erofs has no lower inode to encode, and
+ * FILEID_INVALID leaves the handle out of inotify fdinfo where every stock sibling prints
+ * one. Copy a stock handle (nm_ovl_template()), so the header, the flags and the layer uuid
+ * are stock's, and give the inner erofs fid a nid of our own. Kept on the inode: stock
+ * handles do not change between reads. Read-only only: with an upper layer the encoder may
+ * copy the template's directory up. */
+static int nm_ovl_engine_fh(struct inode *inode, u32 *fh, int *max_len,
+                            const struct export_operations *orig)
+{
+    struct nm_inode_info *info = inode->i_private;
+    u32 tpl[NM_OVL_FH_MAX / 4];
+    u8 *b = (u8 *)fh;
+    int len, type, o;
+    bool kept = false;
+    u64 nid;
+
+    if (!info || !IS_RDONLY(inode))
+        return FILEID_INVALID;
+    if (smp_load_acquire(&info->v_fh_state) == 2) {
+        len = info->v_fh_len;
+        type = info->v_fh_type;
+        memcpy(tpl, info->v_fh, len);
+    } else {
+        type = nm_ovl_template(inode, tpl, &len, &kept, orig);
+        if (type == FILEID_INVALID)
+            return FILEID_INVALID;
+        if (kept && cmpxchg(&info->v_fh_state, 0, 1) == 0) {
+            memcpy(info->v_fh, tpl, len);
+            info->v_fh_len = len;
+            info->v_fh_type = type;
+            smp_store_release(&info->v_fh_state, 2);
+        }
+    }
+    if (*max_len * 4 < len) {
+        *max_len = len >> 2;
+        return FILEID_INVALID;
+    }
+    memcpy(b, tpl, len);
+    *max_len = len >> 2;
+    o = (type == NM_OVL_FILEID_V1 ? 3 : 0) + NM_OVL_FB_HDR;
     nid = ((u64)get_unaligned((u32 *)(b + o)) << 32) | get_unaligned((u32 *)(b + o + 4));
     nid += 1 + (inode->i_ino & 0xfffff);
     put_unaligned((u32)(nid >> 32), (u32 *)(b + o));
     put_unaligned((u32)nid, (u32 *)(b + o + 4));
     put_unaligned(0U, (u32 *)(b + o + 8));
-    return ret;
+    return type;
 }
 
 /* An engine inode comes from the victim's own alloc_inode() with the fs-private part left
