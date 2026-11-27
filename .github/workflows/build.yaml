@@ -269,7 +269,8 @@ jobs:
             # in nomount.mod.c. It also selects the integer normalisation of kCFI
             # tags the GKI is built with, and a module hashed without it fails the CFI check on
             # init_module, so that one is set by hand and asserted. Neither changes struct
-            # module, whose size the kernel checks on load.
+            # module, whose size the kernel checks on load (the stock 6.18 kernel booted in
+            # lkm-smoke refuses a module whose struct module differs).
             KSRC="$RUNNER_TEMP/kmi-src"
             mkdir -p "$KSRC"
             curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
@@ -282,6 +283,9 @@ jobs:
               echo "::error::the ${{ matrix.ksrc }} tree would not take CFI_ICALL_NORMALIZE_INTEGERS"; exit 1; }
             ! grep -qx 'CONFIG_EXTENDED_MODVERSIONS=y' "$KSRC/.config" || {
               echo "::error::extended modversions stayed on with RUST off; modpost cannot write an empty name table"; exit 1; }
+            # struct module carries BTF fields under this option, and its size is checked on load.
+            grep -qx 'CONFIG_DEBUG_INFO_BTF_MODULES=y' "$KSRC/.config" || {
+              echo "::error::DEBUG_INFO_BTF_MODULES is off: struct module would be smaller than the GKI's"; exit 1; }
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
             KDIR="$KSRC"
             modpost_warn="KBUILD_MODPOST_WARN=1"
@@ -678,9 +682,10 @@ jobs:
   # for kernel-<ver>-gz and System.map, and regenerate lkm/kmi-imports/<kmi>.txt against it.
   # A KMI with no GKI prebuilt to boot (kernel/prebuilts/6.18 is empty) gets a stock kernel
   # built from the same commit its module row builds against, in the same pinned image.
-  # LTO and BTF are off for build time; CFI and its integer normalisation stay as GKI has
-  # them, because that is what a module's indirect calls are checked against. Cached by
-  # commit, so only a moved pin pays the build.
+  # LTO is off for build time. BTF stays as GKI has it: DEBUG_INFO_BTF_MODULES adds fields to
+  # struct module, whose size the kernel checks against every module it loads (with BTF off
+  # the 6.18 module was refused for it). CFI and its integer normalisation stay too, because
+  # that is what a module's indirect calls are checked against. Cached by commit.
   gki-src-kernel:
     name: stock ${{ matrix.kmi }} kernel from source
     runs-on: ubuntu-24.04
@@ -698,7 +703,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gki-src
-          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v1
+          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v2
 
       - name: Build the stock kernel
         if: steps.kcache.outputs.cache-hit != 'true'
@@ -711,9 +716,10 @@ jobs:
           M="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=$OUT"
           make -C "$KSRC" $M gki_defconfig > /dev/null
           "$KSRC/scripts/config" --file "$OUT/.config" -e CFI_ICALL_NORMALIZE_INTEGERS \
-            -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE -d DEBUG_INFO_BTF -d WERROR
+            -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE -d WERROR
           make -C "$KSRC" $M olddefconfig > /dev/null
-          for want in CONFIG_CFI=y CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y CONFIG_LTO_NONE=y; do
+          for want in CONFIG_CFI=y CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y CONFIG_LTO_NONE=y \
+                      CONFIG_DEBUG_INFO_BTF_MODULES=y; do
             grep -qx "$want" "$OUT/.config" || { echo "::error::$want did not survive olddefconfig"; exit 1; }
           done
           make -C "$KSRC" $M -j"$(nproc)" Image > "$RUNNER_TEMP/kbuild.log" 2>&1 || {
@@ -726,7 +732,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gki-src
-          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v1
+          key: gki-src-${{ matrix.kmi }}-${{ matrix.ksrc }}-v2
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
