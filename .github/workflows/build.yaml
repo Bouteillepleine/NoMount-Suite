@@ -81,6 +81,9 @@ jobs:
       - name: Engine listing tail positions
         run: sh tests/tail-gap-check.sh
 
+      - name: Check-request watcher
+        run: sh tests/checkwatch.sh
+
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
 

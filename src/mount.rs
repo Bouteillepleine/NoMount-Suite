@@ -2201,6 +2201,11 @@ mod tests {
                  count, and every buffer size resumes without a duplicate or a skip",
             ),
             (
+                "run: sh tests/checkwatch.sh",
+                "the WebUI check-request watcher: a refused request says why, so the page \
+                 falls back at once instead of waiting out its timeout",
+            ),
+            (
                 "run: sh tests/guard-reset.sh",
                 "the bootloop guard across simulated boots: a late-pass panic still parks the \
                  Suite, two quick reboots do not",
