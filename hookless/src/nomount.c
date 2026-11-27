@@ -787,6 +787,10 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
          * one inode holds one size. eo-6 needs the ioctl itself to ask the served file. */
         inode->i_size = i_size_read(real_inode);
         inode->i_blocks = real_inode->i_blocks;
+        /* ext4 and f2fs stamp every inode with a random generation that file handles print;
+         * erofs, overlay and squashfs leave it 0. */
+        if (virtual_sb->s_magic == EXT4_SUPER_MAGIC || virtual_sb->s_magic == F2FS_SUPER_MAGIC)
+            inode->i_generation = real_inode->i_generation;
         /* FIOQSIZE reads i_blocks, so it has to agree with what getattr reports. */
         if (nm_victim_is_overlay(virtual_sb)) {
             inode->i_blocks = 0;
@@ -4310,12 +4314,62 @@ static struct inode *nm_shadowed_inode(struct inode *inode)
 
 #define NM_FILEID_INO64_GEN         0x81
 #define NM_FILEID_INO64_GEN_PARENT  0x82
+#define NM_OVL_FILEID_V0            0xfb
+#define NM_OVL_FILEID_V1            0xf8
+#define NM_OVL_FB_HDR               21  /* version, magic, len, flags, type, uuid */
+
+/* A pure injection on a read-only overlay over erofs has no lower inode to encode, and
+ * FILEID_INVALID leaves the handle out of inotify fdinfo where every stock sibling prints
+ * one. Encode the nearest real ancestor through overlay's own encoder, so the header, the
+ * flags and the layer uuid are stock's, and give the inner erofs fid a nid of our own.
+ * Read-only only: with an upper layer the encoder may copy the ancestor up. */
+static int nm_ovl_engine_fh(struct inode *inode, u32 *fh, int *max_len,
+                            const struct export_operations *orig)
+{
+    struct dentry *d, *p;
+    struct inode *anc = NULL;
+    u8 *b = (u8 *)fh;
+    int i, o, ret, room = *max_len;
+    u64 nid;
+
+    if (!IS_RDONLY(inode))
+        return FILEID_INVALID;
+    d = d_find_any_alias(inode);
+    for (i = 0; d && i < 16; i++) {
+        p = dget_parent(d);
+        dput(d);
+        d = p;
+        if (d->d_inode && d->d_inode->i_sb == inode->i_sb && !nm_is_own_inode(d->d_inode)) {
+            anc = igrab(d->d_inode);
+            break;
+        }
+        if (IS_ROOT(d))
+            break;
+    }
+    dput(d);
+    if (!anc)
+        return FILEID_INVALID;
+    ret = orig->encode_fh(anc, fh, max_len, NULL);
+    iput(anc);
+    o = ret == NM_OVL_FILEID_V1 ? 3 : ret == NM_OVL_FILEID_V0 ? 0 : -1;
+    if (o < 0 || *max_len > room || (int)*max_len * 4 < o + NM_OVL_FB_HDR + 12 ||
+        b[o] != 0 || b[o + 1] != 0xfb || b[o + 2] != NM_OVL_FB_HDR + 12 ||
+        b[o + 4] != NM_FILEID_INO64_GEN)
+        return FILEID_INVALID;
+    o += NM_OVL_FB_HDR;
+    nid = ((u64)get_unaligned((u32 *)(b + o)) << 32) | get_unaligned((u32 *)(b + o + 4));
+    nid += 1 + (inode->i_ino & 0xfffff);
+    put_unaligned((u32)(nid >> 32), (u32 *)(b + o));
+    put_unaligned((u32)nid, (u32 *)(b + o + 4));
+    put_unaligned(0U, (u32 *)(b + o + 8));
+    return ret;
+}
 
 /* An engine inode comes from the victim's own alloc_inode() with the fs-private part left
  * zero. Two encoders read that part: overlayfs dereferences the NULL lower inode (an oops
  * from any app's inotify fdinfo) and erofs prints nid 0 beside the in-band ino. On those two
  * an engine inode gets the handle stock would give it; every other encoder only reads
- * generic inode fields and is called as before.
+ * generic inode fields and gets the stock inode in place of a shadowing one.
  */
 static int nm_encode_fh(struct inode *inode, u32 *fh, int *max_len, struct inode *parent)
 {
@@ -4326,12 +4380,6 @@ static int nm_encode_fh(struct inode *inode, u32 *fh, int *max_len, struct inode
 
     if (!orig || !orig->encode_fh)
         return FILEID_INVALID;
-    if (sb->s_magic != EROFS_SUPER_MAGIC_V1
-#ifdef OVERLAYFS_SUPER_MAGIC
-        && sb->s_magic != OVERLAYFS_SUPER_MAGIC
-#endif
-       )
-        return orig->encode_fh(inode, fh, max_len, parent);
 
     si = nm_shadowed_inode(inode);
     sp = parent ? nm_shadowed_inode(parent) : NULL;
@@ -4339,14 +4387,27 @@ static int nm_encode_fh(struct inode *inode, u32 *fh, int *max_len, struct inode
         inode = si;
     if (sp)
         parent = sp;
+    if (sb->s_magic != EROFS_SUPER_MAGIC_V1
+#ifdef OVERLAYFS_SUPER_MAGIC
+        && sb->s_magic != OVERLAYFS_SUPER_MAGIC
+#endif
+       ) {
+        /* These read only i_ino and i_generation: a shadowing inode is encoded as the
+         * stock one it stands in for. */
+        ret = orig->encode_fh(inode, fh, max_len, parent);
+        goto out;
+    }
     if (!nm_is_own_inode(inode) && !(parent && nm_is_own_inode(parent))) {
         ret = orig->encode_fh(inode, fh, max_len, parent);
         goto out;
     }
     /* ovl_encode_fh answers this for a connectable request and for any encode error. */
     ret = FILEID_INVALID;
-    if (sb->s_magic != EROFS_SUPER_MAGIC_V1)
+    if (sb->s_magic != EROFS_SUPER_MAGIC_V1) {
+        if (!parent && !si && nm_is_own_inode(inode))
+            ret = nm_ovl_engine_fh(inode, fh, max_len, orig);
         goto out;
+    }
     /* erofs_encode_fh's layout; a stock erofs inode's i_ino is its nid on 64-bit. */
     len = parent ? 6 : 3;
     if (*max_len < len) {
