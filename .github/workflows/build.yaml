@@ -261,20 +261,25 @@ jobs:
           KSRC=""
           modpost_warn=""
           if [ -n "${{ matrix.ksrc }}" ]; then
-            # The KMI branch at a pinned commit, prepared with the image's compiler. Rust is not
-            # in the image, so Kconfig drops RUST and the integer normalisation of kCFI tags it
-            # selects; a module hashed without it fails the GKI's CFI check on init_module, so
-            # it is set by hand and asserted. modules_prepare writes no Module.symvers, which
-            # an empty __versions does not need: modpost only warns about the imports.
+            # The KMI branch at a pinned commit, prepared with the image's compiler.
+            # modules_prepare writes no Module.symvers, which an empty __versions does not need:
+            # modpost only warns about the imports. RUST is off here because it selects extended
+            # modversions, whose name table modpost writes as `= ;` when no import has a CRC (a
+            # compile error in nomount.mod.c). It also selects the integer normalisation of kCFI
+            # tags the GKI is built with, and a module hashed without it fails the CFI check on
+            # init_module, so that one is set by hand and asserted. Neither changes struct
+            # module, whose size the kernel checks on load.
             KSRC="$RUNNER_TEMP/kmi-src"
             mkdir -p "$KSRC"
             curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
               "https://android.googlesource.com/kernel/common/+archive/${{ matrix.ksrc }}.tar.gz" | tar -xz -C "$KSRC"
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig > /dev/null
-            "$KSRC/scripts/config" --file "$KSRC/.config" -e CFI_ICALL_NORMALIZE_INTEGERS
+            "$KSRC/scripts/config" --file "$KSRC/.config" -d RUST -e CFI_ICALL_NORMALIZE_INTEGERS
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig > /dev/null
             grep -qx 'CONFIG_CFI_ICALL_NORMALIZE_INTEGERS=y' "$KSRC/.config" || {
               echo "::error::the ${{ matrix.ksrc }} tree would not take CFI_ICALL_NORMALIZE_INTEGERS"; exit 1; }
+            ! grep -qx 'CONFIG_EXTENDED_MODVERSIONS=y' "$KSRC/.config" || {
+              echo "::error::extended modversions stayed on with RUST off; modpost cannot write an empty name table"; exit 1; }
             make -C "$KSRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
             KDIR="$KSRC"
             modpost_warn="KBUILD_MODPOST_WARN=1"
