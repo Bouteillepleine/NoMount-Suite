@@ -115,7 +115,8 @@
     }
     $("state").textContent = "Active";
     if (d.rules > 0) {
-      let pending = 0;
+      // -1 until the plan is read: green needs the plan-versus-live comparison to have run.
+      let pending = -1;
       try {
         // As sets: absorbed rules and durable whiteouts are live but not planned, and a
         // count comparison let them hide the same number of unserved planned files.
@@ -133,6 +134,8 @@
       const bits = [];
       if (pending > 0) {
         bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet. Press Reload`);
+      } else if (pending < 0) {
+        bits.push("plan unreadable, so whether every planned file is served is unknown");
       }
       if (attn > 0) {
         bits.push(`${attn} finding${attn > 1 ? "s" : ""} · see Checks`);
@@ -140,7 +143,7 @@
       $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
                                               : "modules injected";
       // Green means measured and nothing to look at; a finding is attention, not clean.
-      dot.className = pending > 0 || attn > 0 ? "dot info" : "dot ok";
+      dot.className = pending !== 0 || attn > 0 ? "dot info" : "dot ok";
       return d.rules;
     }
     let ships = -1, planned = -1;
