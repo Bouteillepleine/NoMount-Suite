@@ -59,17 +59,42 @@ pub fn apk_scope_from(raw: &str, installed: &[(String, u32)]) -> Result<Vec<u32>
         anyhow::bail!("the installed-package list could not be read, so no entry can be resolved");
     }
     let mut keep: Vec<&str> = Vec::new();
+    let mut unmatched: Vec<&str> = Vec::new();
     for e in entries {
         if e.parse::<u32>().is_err() && expand(e, installed)?.is_empty() {
-            eprintln!("nomount: apkscope: {e} matches no installed package - ignored until one does");
+            unmatched.push(e);
             continue;
         }
         keep.push(e);
+    }
+    if let Some(note) = unmatched_note(&unmatched, redact_hide_list()) {
+        eprintln!("{note}");
     }
     if keep.is_empty() {
         return Ok(Vec::new());
     }
     resolve_appid_list_in(&keep.join(","), installed)
+}
+
+/// apkscope names the apps patched APKs are kept from, so a redacted run (a shared export)
+/// says how many entries were skipped, not which.
+fn unmatched_note(unmatched: &[&str], redact: bool) -> Option<String> {
+    match unmatched {
+        [] => None,
+        [_] if redact => Some(
+            "nomount: apkscope: 1 entry matches no installed package - ignored until one does"
+                .to_string(),
+        ),
+        _ if redact => Some(format!(
+            "nomount: apkscope: {} entries match no installed package - ignored until one does",
+            unmatched.len()
+        )),
+        _ => Some(format!(
+            "nomount: apkscope: {} match{} no installed package - ignored until one does",
+            unmatched.join(", "),
+            if unmatched.len() == 1 { "es" } else { "" }
+        )),
+    }
 }
 
 /// The engine holds at most this many excluded appids per rule.
@@ -627,6 +652,20 @@ mod tests {
             ("com.android.vending".to_string(), 10170),
             ("com.google.android.gms.supervision".to_string(), 1010159),
         ]
+    }
+
+    #[test]
+    fn a_redacted_run_does_not_name_an_uninstalled_apkscope_entry() {
+        use super::unmatched_note;
+        assert_eq!(unmatched_note(&[], false), None);
+        let named = unmatched_note(&["com.some.detector"], false).expect("a note");
+        assert!(named.contains("com.some.detector matches no installed package"), "{named}");
+        let one = unmatched_note(&["com.some.detector"], true).expect("a note");
+        assert!(!one.contains("com.some.detector"), "{one}");
+        assert!(one.contains("1 entry matches"), "{one}");
+        let two = unmatched_note(&["com.a.b", "*.detector"], true).expect("a note");
+        assert!(!two.contains("com.a.b") && !two.contains("detector"), "{two}");
+        assert!(two.contains("2 entries match"), "{two}");
     }
 
     #[test]
