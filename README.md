@@ -91,7 +91,9 @@ content that must come back every boot, ship it in a module.
 cargo test && ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --lite
 ```
 
-That builds the 00_ zip, for a kernel with NoMount built in. Without `--lite`,
+That builds the 00_ zip, for a kernel with NoMount built in, labelled with the
+next patch version; `Cargo.toml`, `Cargo.lock` and `module.prop` are put back
+afterwards. Without `--lite`,
 `package.sh` also packages the 01_ zip and stops unless the seven
 `module/lkm/nomount-*.ko` from CI's `build.yaml` are there; a release build
 (`--version vX.Y.Z`) also needs `module/bin/ko-loader-arm64`.

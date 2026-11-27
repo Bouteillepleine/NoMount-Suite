@@ -70,11 +70,17 @@ _unstamp() {
     # the staging tree used to be removed only on the paths that exit deliberately, so
     # any failure set -e caught - or any ^C - left a full copy of the module in /tmp
     [ -n "$_staging_active" ] && rm -rf "$_staging_active"
-    if [ "$rc" -ne 0 ] && [ -f "$_stamp_saved/Cargo.toml" ]; then
+    # A scratch build (no --version) bumps to the next patch for its zip only. Left in the
+    # tree, the bump went into PRs and fired tag.yml for a version with no CHANGELOG section.
+    if [ -f "$_stamp_saved/Cargo.toml" ] && { [ "$rc" -ne 0 ] || [ "$VERSION_GIVEN" = false ]; }; then
         cp "$_stamp_saved/Cargo.toml" "$PROJECT_ROOT/Cargo.toml"
         cp "$_stamp_saved/module.prop" "$MODULE_DIR/module.prop"
         [ -f "$_stamp_saved/Cargo.lock" ] && cp "$_stamp_saved/Cargo.lock" "$PROJECT_ROOT/Cargo.lock"
-        echo "       version stamp rolled back to v${CURRENT_VERSION}" >&2
+        if [ "$rc" -ne 0 ]; then
+            echo "       version stamp rolled back to v${CURRENT_VERSION}" >&2
+        else
+            echo "==> Cargo.toml, Cargo.lock and module.prop put back at v${CURRENT_VERSION} (--version keeps a stamp)"
+        fi
     fi
     rm -rf "$_stamp_saved"
 }
