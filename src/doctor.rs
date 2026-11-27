@@ -1793,7 +1793,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             // An engine-injected path is absent for a hidden uid with or without the cloak,
             // so sampling only those could never fail. Paths no engine rule covers go first:
             // they are the cloak's own work.
-            let engine_targets = (guids.first().is_some() && !gpaths.is_empty())
+            let engine_targets = (!guids.is_empty() && !gpaths.is_empty())
                 .then(|| engine_targets_of(nm.list_retry()));
             let unclassified = matches!(engine_targets, Some(Err(_)));
             if let Some(Err(e)) = &engine_targets {

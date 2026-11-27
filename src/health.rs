@@ -1174,7 +1174,7 @@ fn stored_zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let (mut out, mut central, mut count) = (Vec::new(), Vec::new(), 0u16);
     for (name, data) in files {
         let (crc, size, nlen, off) =
-            (crc32(&data), data.len() as u32, name.len() as u16, out.len() as u32);
+            (crc32(data), data.len() as u32, name.len() as u16, out.len() as u32);
         const TIME_DATE: [u8; 4] = [0, 0, 0x21, 0];
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
         out.extend_from_slice(&[20, 0, 0, 0, 0, 0]);
@@ -1185,7 +1185,7 @@ fn stored_zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(&nlen.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&data);
+        out.extend_from_slice(data);
         central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
         central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0]);
         central.extend_from_slice(&TIME_DATE);
