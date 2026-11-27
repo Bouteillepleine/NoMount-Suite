@@ -1190,6 +1190,20 @@ fn durable_not_planned(durable: Vec<PathBuf>, plan: &[PlanEntry]) -> Vec<PathBuf
     durable.into_iter().filter(|w| !planned.contains(w.as_path())).collect()
 }
 
+/// A module that could not be listed is not unloaded: Some, with whether the rule is an
+/// inject whose recorded identity has to go with it. Dropping that row made the next reload
+/// read a hot-installed replacement as up to date. A whiteout names no source to attribute,
+/// so while any module is unlisted they all stay.
+fn held_for_unlisted(rule: Option<&LiveRule>, unlisted: &[PathBuf]) -> Option<bool> {
+    if unlisted.is_empty() {
+        return None;
+    }
+    match rule {
+        Some(LiveRule::Inject(src)) => unlisted.iter().any(|m| src.starts_with(m)).then_some(true),
+        _ => Some(false),
+    }
+}
+
 fn prunable(
     target: &Path,
     uid: u32,
@@ -1355,16 +1369,11 @@ pub fn run_reload() -> Result<()> {
         if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
         }
-        // A module that could not be listed is not unloaded. A whiteout names no source to
-        // attribute, so while any module is unlisted they all stay this pass.
-        if !unlisted.is_empty() {
-            let keep = match live.get(&(t.clone(), *uid)) {
-                Some(LiveRule::Inject(src)) => unlisted.iter().any(|m| src.starts_with(m)),
-                _ => true,
-            };
-            if keep {
-                continue;
+        if let Some(inject) = held_for_unlisted(live.get(&(t.clone(), *uid)), &unlisted) {
+            if inject {
+                kept_identity.push(t.clone());
             }
+            continue;
         }
         if nm.del_any(t).is_ok() {
             removed += 1;
@@ -3257,6 +3266,19 @@ mod tests {
             let md = fs::symlink_metadata(&node).unwrap();
             assert!(is_whiteout_marker(&md.file_type(), &node), "a real 0:0 node was not recognised");
         }
+    }
+
+    #[test]
+    fn an_unlisted_module_keeps_its_rules_and_their_recorded_identity() {
+        let unlisted = [PathBuf::from("/data/adb/modules/M")];
+        let ours = LiveRule::Inject(PathBuf::from("/data/adb/modules/M/system/etc/x"));
+        let other = LiveRule::Inject(PathBuf::from("/data/adb/modules/N/system/etc/x"));
+        assert_eq!(held_for_unlisted(Some(&ours), &unlisted), Some(true));
+        assert_eq!(held_for_unlisted(Some(&other), &unlisted), None, "N was listed: prunable");
+        assert_eq!(held_for_unlisted(Some(&LiveRule::Whiteout), &unlisted), Some(false));
+        assert_eq!(held_for_unlisted(Some(&ours), &[]), None);
+        let sibling = LiveRule::Inject(PathBuf::from("/data/adb/modules/M2/system/etc/x"));
+        assert_eq!(held_for_unlisted(Some(&sibling), &unlisted), None, "a prefix is not a module");
     }
 
     #[test]
