@@ -29,7 +29,8 @@ COMMON = [
     "rules_added_ext4", "served_bytes_ext4", "served_stat_ext4", "injected_listed_ext4",
     "injected_bytes_ext4",
     "seek_end_erofs",
-    "hidden_stock_bytes", "hidden_stat_stock", "hidden_no_injected", "hidden_unblock",
+    "hidden_stock_bytes", "hidden_stat_stock", "hidden_no_injected", "lock_eof_hidden",
+    "fioqsize_hidden", "hidden_unblock",
     "del_restores", "clear_restores_listing",
 ]
 EXPECTED = {
@@ -93,6 +94,7 @@ def victim_tree(root):
         "b.conf": "bb\n",
         "fstab.stub": "none\n",
         "sub/c.conf": "c\n",
+        "sub/big.bin": "s\n",
     }
     for rel, text in files.items():
         with open(os.path.join(etc, rel), "w") as f:
@@ -124,7 +126,8 @@ def initramfs(args, work):
     erofs, ext4 = build_images(work)
     init = build_init(args.cc, work)
     c = Cpio()
-    for d in ("dev", "proc", "sys", "v", "x", "bin", "m", "m/v", "m/v/etc", "m/x", "m/x/etc"):
+    for d in ("dev", "proc", "sys", "v", "x", "bin", "m", "m/v", "m/v/etc", "m/v/etc/sub", "m/x",
+              "m/x/etc", "m/x/etc/sub"):
         c.dir(d)
     c.chardev("dev/console", 5, 1)
     c.chardev("dev/ttyAMA0", 204, 64)
@@ -134,6 +137,8 @@ def initramfs(args, work):
     for r in ("v", "x"):
         c.file("m/%s/etc/hosts" % r, MODULE_HOSTS.encode())
         c.file("m/%s/etc/injected.conf" % r, MODULE_INJECTED.encode())
+        # Three blocks where the stock file has one: FIOQSIZE tells the two copies apart.
+        c.file("m/%s/etc/sub/big.bin" % r, b"M" * 12288)
     c.file("init", read(init), 0o755)
     c.file("bin/nm", read(args.nm), 0o755)
     c.file("victim.erofs", read(erofs))

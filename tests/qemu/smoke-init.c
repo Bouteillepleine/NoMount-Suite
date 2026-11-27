@@ -287,7 +287,7 @@ static const char *module_injected = "injected by the smoke module\n";
 /* The served/injected checks for one victim mount: rules under /<root>/etc. */
 static void victim_checks(const char *root, const char *fs, int stock_entries)
 {
-	char vh[128], vi[128], ve[128], mh[128], mi[128], name[64], buf[512];
+	char vh[128], vi[128], ve[128], mh[128], mi[128], vb[128], mb[128], name[64], buf[512];
 	struct stat st;
 	long got;
 	int n, hits;
@@ -297,9 +297,12 @@ static void victim_checks(const char *root, const char *fs, int stock_entries)
 	snprintf(vi, sizeof(vi), "%s/etc/injected.conf", root);
 	snprintf(mh, sizeof(mh), "/m%s/etc/hosts", root);
 	snprintf(mi, sizeof(mi), "/m%s/etc/injected.conf", root);
+	snprintf(vb, sizeof(vb), "%s/etc/sub/big.bin", root);
+	snprintf(mb, sizeof(mb), "/m%s/etc/sub/big.bin", root);
 
 	n = nm("add", vh, mh);
 	n |= nm("add", vi, mi);
+	n |= nm("add", vb, mb);
 	snprintf(name, sizeof(name), "rules_added_%s", fs);
 	check(name, n == 0, "nm add returned non-zero");
 
@@ -389,6 +392,30 @@ static void hidden_checks(int builtin)
 		if (builtin)
 			say("%s fionread_hidden %d, stock %zu", avail == (int)strlen(stock_hosts) ? "ok" : "bad", avail,
 			    strlen(stock_hosts));
+		fd = open("/v/etc/hosts", O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			/* A range one byte before the stock file's start: stock refuses it (EINVAL); measured
+			 * from the module copy's size it is a valid range. And a query that conflicts with
+			 * nothing comes back with the caller's own SEEK_END fields, as stock leaves them. */
+			struct flock a = { .l_type = F_RDLCK, .l_whence = SEEK_END,
+					   .l_start = -(off_t)strlen(stock_hosts) - 1, .l_len = 1 };
+			struct flock b = { .l_type = F_RDLCK, .l_whence = SEEK_END, .l_start = -1, .l_len = 1 };
+			long long q = -1;
+			int ea = fcntl(fd, F_OFD_GETLK, &a) ? errno : 0;
+			int eb = fcntl(fd, F_OFD_GETLK, &b) ? errno : 0;
+			int bf = open("/v/etc/sub/big.bin", O_RDONLY | O_CLOEXEC);
+			int eq = bf < 0 ? errno : ioctl(bf, FIOQSIZE, &q) ? errno : 0;
+
+			say("%s lock_eof_hidden before-start errno %d (stock EINVAL); no-conflict errno %d type %d whence %d start %lld",
+			    ea == EINVAL && !eb && b.l_type == F_UNLCK && b.l_whence == SEEK_END && b.l_start == -1 ? "ok" : "bad",
+			    ea, eb, b.l_type, b.l_whence, (long long)b.l_start);
+			say("%s fioqsize_hidden %lld errno %d, stat blocks*512 %lld",
+			    !eq && !fstat(bf, &s) && q == (long long)s.st_blocks * 512 ? "ok" : "bad", q, eq,
+			    (long long)s.st_blocks * 512);
+			if (bf >= 0)
+				close(bf);
+			close(fd);
+		}
 		_exit(0);
 	}
 	close(p[1]);
@@ -404,7 +431,7 @@ static void hidden_checks(int builtin)
 	waitpid(pid, &st, 0);
 	{
 		const char *names[] = { "hidden_stock_bytes", "hidden_stat_stock", "hidden_no_injected",
-					builtin ? "fionread_hidden" : NULL };
+					"lock_eof_hidden", "fioqsize_hidden", builtin ? "fionread_hidden" : NULL };
 		unsigned int i;
 
 		for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
