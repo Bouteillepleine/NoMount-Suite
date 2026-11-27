@@ -332,6 +332,15 @@ static bool nm_vdir_erofs_size __read_mostly;
 #define EROFS_SUPER_MAGIC_V1 0xE0F5E1E2
 #endif
 static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize);
+static bool nm_victim_ro_image(const struct super_block *sb);
+
+/* The block an erofs-shaped listing packs into. overlayfs never sets s_blocksize, so on an
+ * overlay victim it is the sampled erofs ancestor's st_blksize. */
+static inline unsigned int nm_pack_bs(const struct nm_inode_info *info, const struct super_block *sb)
+{
+    if (info && info->v_blksize) return info->v_blksize;
+    return sb->s_blocksize ? sb->s_blocksize : 4096;
+}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat);
 #else
@@ -826,7 +835,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
                        (rule_info->v_cap & NM_CAP_THPMAP);
 
             inode->i_op = &nm_file_iops;
-        #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
             if (!S_ISLNK(real_inode->i_mode) && real_inode->i_fop && real_inode->i_fop->mmap_prepare)
                 inode->i_fop = thp ? &nm_file_fops_mmap_prepare_thp : &nm_file_fops_mmap_prepare;
             else
@@ -1269,7 +1278,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 
             if (vi && vi->dir_node &&
                 (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
-                sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
+                sz = nm_vdir_size(vi->dir_node, nm_pack_bs(vi, sb));
             offset += sz;
             break;
         }
@@ -1283,7 +1292,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 
             if (vi && vi->dir_node &&
                 (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
-                sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
+                sz = nm_vdir_size(vi->dir_node, nm_pack_bs(vi, sb));
             if ((unsigned long long)offset >= (unsigned long long)sz)
                 return -ENXIO;
             if (whence == SEEK_HOLE)
@@ -1319,7 +1328,11 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
     }
 
-    if (whence == SEEK_DATA || whence == SEEK_HOLE) {
+    /* erofs (and overlay over it) has no holes: DATA/HOLE are generic_file_llseek's, not
+     * the module file's. A caller served stock asks the stock file itself. */
+    if ((whence == SEEK_DATA || whence == SEEK_HOLE) &&
+        (file_inode(real_file)->i_sb == file_inode(file)->i_sb ||
+         !nm_victim_ro_image(file_inode(file)->i_sb))) {
         real_file->f_pos = file->f_pos;
         res = vfs_llseek(real_file, offset, whence);
         file->f_pos = real_file->f_pos;
@@ -1409,18 +1422,16 @@ static int nm_mmap(struct file *file, struct vm_area_struct *vma)
     return generic_file_readonly_mmap(file, vma);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+/* 6.16 has ->mmap_prepare but no generic_file_readonly_mmap_prepare(); there the plain
+ * tables' ->mmap serves every file. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static int nm_mmap_prepare(struct vm_area_desc *desc)
 {
     struct file *file = desc->file;
     struct file *real_file = file->private_data;
 
     if (!real_file) return -ENODEV;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
     return generic_file_readonly_mmap_prepare(desc);
-#else
-    return -ENOSYS;
-#endif
 }
 #endif
 
@@ -1576,7 +1587,7 @@ static u16 nm_size_ratio(loff_t size, blkcnt_t blocks)
 static void nm_mirror_blocks(const struct nm_inode_info *info, struct inode *v_inode,
                              const struct path *backing, struct kstat *stat)
 {
-    u64 bs = info->v_blksize ? info->v_blksize : v_inode->i_sb->s_blocksize;
+    u64 bs = nm_pack_bs(info, v_inode->i_sb);
     u64 want, rup, cap;
     bool compressed = info->v_cratio != 0;
 
@@ -2501,7 +2512,7 @@ static void nm_dsnap_drop(struct nm_inode_info *info)
 static loff_t nm_dsnap_dir_size(struct inode *v_inode, struct nm_inode_info *info)
 {
     struct super_block *sb = v_inode->i_sb;
-    unsigned int bs = sb->s_blocksize ? sb->s_blocksize : 4096;
+    unsigned int bs = nm_pack_bs(info, sb);
     struct nm_dsnap *s;
     loff_t sz;
 
@@ -2517,7 +2528,7 @@ static loff_t nm_dsnap_dir_size(struct inode *v_inode, struct nm_inode_info *inf
 static bool nm_dsnap_size_fix(struct nm_inode_info *info, struct inode *v_inode,
                               struct kstat *stat)
 {
-    unsigned int bs = v_inode->i_sb->s_blocksize ? v_inode->i_sb->s_blocksize : 4096;
+    unsigned int bs = nm_pack_bs(info, v_inode->i_sb);
     loff_t sz = nm_dsnap_dir_size(v_inode, info);
 
     if (sz <= 0) return false;
@@ -2918,7 +2929,7 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
             stat->blocks = 8;
         stat->nlink = nm_vdir_nlink(info->dir_node);
         if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
-            unsigned long vbs = v_inode->i_sb->s_blocksize;
+            unsigned long vbs = nm_pack_bs(info, v_inode->i_sb);
 
             stat->size = nm_vdir_size(info->dir_node, vbs);
             if (vbs)
@@ -3108,15 +3119,15 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         if (sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
             if (!real_file && (info->flags & NM_FLAG_VIRTUAL_DIR))
                 return nm_vdir_iterate_erofs(file, ctx, info, dir_node,
-                                             sb->s_blocksize);
+                                             nm_pack_bs(info, sb));
             if (real_file && !(info->flags & NM_FLAG_VIRTUAL_DIR) &&
                 info->r_path.dentry &&
                 real_file->f_path.dentry == info->r_path.dentry) {
                 bool transient;
-                struct nm_dsnap *snap = nm_dsnap_get_ex(info, sb->s_blocksize, &transient);
+                struct nm_dsnap *snap = nm_dsnap_get_ex(info, nm_pack_bs(info, sb), &transient);
 
                 if (snap) {
-                    res = nm_dsnap_iterate(file, ctx, info, snap, sb->s_blocksize);
+                    res = nm_dsnap_iterate(file, ctx, info, snap, nm_pack_bs(info, sb));
                     nm_dsnap_put(snap);
                     return res;
                 }
@@ -3784,7 +3795,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
 #define NM_FOP_FLAGS
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static const struct file_operations nm_file_fops_mmap_prepare = {
     .owner = THIS_MODULE,
     NM_FOP_FLAGS
