@@ -45,19 +45,22 @@ is meant for. Read the matrix run rather than hand-checking the result.
 
 ## What the patch covers, and what it does not
 
-Four hunks, plus the FIONREAD hook that ships as its own patch:
+Four hunks, plus the size hooks that ship as their own patch:
 
 | hunk | what it buys |
 | :--- | :--- |
 | `fs/Kconfig`, `fs/Makefile` | `CONFIG_NOMOUNT` and the object |
 | `fs/proc/task_mmu.c` | `vfs_map_meta_override()` in `show_map_vma()`, so an injected file reports the stock dev/ino in `/proc/<pid>/maps` |
 | `fs/xattr.c` | `nm_inode_hidden_from_caller()` in `vfs_getxattr()`, so a caller denied `open()` is also denied `security.selinux` |
-| `fs/ioctl.c` | `nm_fionread_isize()` in `case FIONREAD`, so a caller served the stock file is told the stock size, not the module file's |
+| `fs/ioctl.c` | `nm_fionread_isize()` in `case FIONREAD`, so a caller served the stock file is told the stock size, not the module file's; `nm_fioqsize_bytes()` in `case FIOQSIZE`, so the byte count is `st_blocks` in bytes |
+| `fs/locks.c` | `nm_lock_eof()` in the `SEEK_END` case of `flock64_to_posix_lock()`, so a byte-range lock from the end is measured from `st_size`, not the inode's `i_size` |
 
-The FIONREAD hook is two variant patches because the case moved: `file_ioctl()`
-on 4.9-5.4, `do_vfs_ioctl()` on 5.10-6.18. Exactly one applies to any tree at
-`--fuzz=0`; the compile matrix fails if that stops being true, or if the hook
-lands outside `case FIONREAD`. It is separate from the integration patch so the
+The size hooks are two variant patches because the FIONREAD case moved: `file_ioctl()`
+on 4.9-5.4, `do_vfs_ioctl()` on 5.10-6.18. Both carry the same `fs/locks.c` hunk, since
+that case reads the same in every tree. Exactly one variant applies to any tree at
+`--fuzz=0`; the compile matrix fails if that stops being true, or if a hook lands
+outside its case. The FIOQSIZE and lock hunks ride in the FIONREAD files so a
+`kernel_patches` that already applies `nomount_fionread_*.patch` picks them up. It is separate from the integration patch so the
 builders can pick the variant by trying both, and so an engine ref that predates
 it still pairs with any `kernel_patches`.
 

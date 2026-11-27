@@ -4,6 +4,10 @@ FIONREAD answers i_size_read(file_inode(filp)) before any file operation runs. A
 inode is shared by every caller, and a caller the rule does not serve reads the STOCK file
 through it, so it was told the module file's size (a hidden app: hosts 56 bytes by fstat
 and read, 2,033,224 by FIONREAD). nm_fionread_isize() answers for the file actually read.
+Two more raw readers ride in the same patch so the builders need no new step: FIOQSIZE
+(inode_get_bytes) answers st_blocks in bytes through nm_fioqsize_bytes(), and a SEEK_END
+byte-range lock (fs/locks.c, identical in every tree) measures from st_size through
+nm_lock_eof().
 
 One of two variants: this one fits 4.9, 4.14, 4.19 and 5.4, where FIONREAD lives in
 file_ioctl() on one line; nomount_fionread_do_vfs_ioctl.patch fits 5.10-6.18. Exactly one
@@ -21,3 +25,26 @@ diff --git a/fs/ioctl.c b/fs/ioctl.c
 +#endif
  		return put_user(i_size_read(inode) - filp->f_pos, p);
  	case FS_IOC_RESVSP:
+@@ -661,3 +665,8 @@
+ 		    S_ISLNK(inode->i_mode)) {
++#ifdef CONFIG_NOMOUNT
++			extern loff_t nm_fioqsize_bytes(struct file *, struct inode *);
++			loff_t res = nm_fioqsize_bytes(filp, inode);
++#else
+ 			loff_t res = inode_get_bytes(inode);
++#endif
+ 			error = copy_to_user(argp, &res, sizeof(res)) ?
+diff --git a/fs/locks.c b/fs/locks.c
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -527,5 +527,10 @@
+ 		break;
+ 	case SEEK_END:
++#ifdef CONFIG_NOMOUNT
++		{ extern loff_t nm_lock_eof(struct file *);
++		  fl->fl_start = nm_lock_eof(filp); }
++#else
+ 		fl->fl_start = i_size_read(file_inode(filp));
++#endif
+ 		break;
+ 	default:

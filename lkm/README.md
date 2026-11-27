@@ -167,6 +167,15 @@ hook: on the OP15 6.12.69 build `do_vfs_ioctl()` is inlined into
 rewrite the value after it was copied to user memory. It shows only to a caller
 hidden from a rule, on a file whose module copy differs in size from stock.
 
+The same goes for two more readers of the raw inode. A byte-range lock with
+`l_whence = SEEK_END` (`fcntl(F_GETLK)` and friends) measures from `i_size`, and
+FIOQSIZE (root and shell only) reports `i_blocks`. The in-tree build hooks both, in
+`fs/locks.c` and `fs/ioctl.c`. Here a directory the engine creates keeps its
+`i_size` at the size `stat` last gave, so the lock answer matches for it. A replaced
+file still answers with the module copy's size, for a caller hidden from the rule.
+A kprobe cannot fix that: the answer needs a `getattr`, which can sleep, and on
+`F_UNLCK` the rewritten range would come back to the caller.
+
 ## When it is still the right choice
 
 - A kernel you cannot rebuild, where in-tree is not on the table at all.

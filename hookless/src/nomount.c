@@ -2901,6 +2901,13 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
             if (vbs)
                 stat->blocks = (blkcnt_t)((((u64)stat->size + vbs - 1) & ~((u64)vbs - 1)) >> 9);
         }
+        /* A SEEK_END lock reads i_size raw, and the LKM has no fs/locks.c hook: keep this
+         * engine-owned inode's i_size at the size stat just gave. */
+        if (unlikely(i_size_read(v_inode) != stat->size)) {
+            spin_lock(&v_inode->i_lock);
+            i_size_write(v_inode, stat->size);
+            spin_unlock(&v_inode->i_lock);
+        }
         return 0;
     }
 
@@ -7994,6 +8001,45 @@ loff_t nm_fionread_isize(struct file *filp, struct inode *inode)
     if (!real || !file_inode(real))
         return i_size_read(inode);
     return i_size_read(file_inode(real));
+}
+
+/* An engine inode or a hijacked directory, whose i_size and i_blocks are not what stat
+ * tells this caller. */
+static bool nm_stat_for_raw_reader(struct file *filp, struct kstat *st)
+{
+    struct inode *inode = file_inode(filp);
+    bool ours = inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops;
+
+    if (!ours) {
+        rcu_read_lock();
+        ours = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop,
+                        getattr, nomount_hijacked_getattr) != NULL;
+        rcu_read_unlock();
+    }
+    return ours && nm_path_stat(&filp->f_path, st) == 0;
+}
+
+/* The fs/locks.c hook: l_whence=SEEK_END reads i_size off the inode, so the lock range is
+ * measured against st_size, as stock's is. */
+loff_t nm_lock_eof(struct file *filp);
+loff_t nm_lock_eof(struct file *filp)
+{
+    struct kstat st;
+
+    if (unlikely(!filp))
+        return 0;
+    return nm_stat_for_raw_reader(filp, &st) ? st.size : i_size_read(file_inode(filp));
+}
+
+/* The fs/ioctl.c FIOQSIZE hook: st_blocks in bytes, as stock's inode_get_bytes() is. */
+loff_t nm_fioqsize_bytes(struct file *filp, struct inode *inode);
+loff_t nm_fioqsize_bytes(struct file *filp, struct inode *inode)
+{
+    struct kstat st;
+
+    if (unlikely(!filp || !inode))
+        return inode ? inode_get_bytes(inode) : 0;
+    return nm_stat_for_raw_reader(filp, &st) ? (loff_t)st.blocks << 9 : inode_get_bytes(inode);
 }
 
 static void __exit nomount_exit(void)

@@ -9,12 +9,25 @@ One of two variants: this one fits 5.10, 5.15, 6.1, 6.6, 6.12 and 6.18, where FI
 lives in do_vfs_ioctl() after an S_ISREG check; nomount_fionread_file_ioctl.patch fits
 4.9-5.4. Exactly one applies at fuzz 0 to any tree. The context is two lines each side on
 purpose: the S_ISREG line differs on 6.18 and the line after the case differs on 5.10.
+The FIOQSIZE hunk takes one line each side for the same S_ISREG reason. FIOQSIZE
+(inode_get_bytes) answers st_blocks in bytes through nm_fioqsize_bytes(), and a SEEK_END
+byte-range lock (fs/locks.c, identical in every tree) measures from st_size through
+nm_lock_eof(): two more raw readers, in this patch so the builders need no new step.
 Apply after nomount_kernel_integration.patch.
 
 diff --git a/fs/ioctl.c b/fs/ioctl.c
 --- a/fs/ioctl.c
 +++ b/fs/ioctl.c
-@@ -860,4 +860,9 @@
+@@ -825,3 +825,8 @@
+ 		    S_ISLNK(inode->i_mode)) {
++#ifdef CONFIG_NOMOUNT
++			extern loff_t nm_fioqsize_bytes(struct file *, struct inode *);
++			loff_t res = nm_fioqsize_bytes(filp, inode);
++#else
+ 			loff_t res = inode_get_bytes(inode);
++#endif
+ 			return copy_to_user(argp, &res, sizeof(res)) ?
+@@ -860,4 +865,9 @@
  			return vfs_ioctl(filp, cmd, arg);
  
 +#ifdef CONFIG_NOMOUNT
@@ -24,3 +37,17 @@ diff --git a/fs/ioctl.c b/fs/ioctl.c
 +#endif
  		return put_user(i_size_read(inode) - filp->f_pos,
  				(int __user *)argp);
+diff --git a/fs/locks.c b/fs/locks.c
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -500,5 +500,10 @@
+ 		break;
+ 	case SEEK_END:
++#ifdef CONFIG_NOMOUNT
++		{ extern loff_t nm_lock_eof(struct file *);
++		  fl->fl_start = nm_lock_eof(filp); }
++#else
+ 		fl->fl_start = i_size_read(file_inode(filp));
++#endif
+ 		break;
+ 	default:

@@ -405,10 +405,24 @@ jobs:
           awk '/^\tcase [A-Z_0-9]+:/ { c=$2 } /nm_fionread_isize\(filp, inode\)/ { n++; if (c != "FIONREAD:") bad=1 }
                END { exit !(n == 1 && !bad) }' fs/ioctl.c || {
             echo "FATAL: the FIONREAD hook is missing, doubled or outside case FIONREAD for ${{ matrix.ver }}"; exit 1; }
+          awk '/^\tcase [A-Z_0-9]+:/ { c=$2 } /nm_fioqsize_bytes\(filp, inode\)/ { n++; if (c != "FIOQSIZE:") bad=1 }
+               END { exit !(n == 1 && !bad) }' fs/ioctl.c || {
+            echo "FATAL: the FIOQSIZE hook is missing, doubled or outside case FIOQSIZE for ${{ matrix.ver }}"; exit 1; }
           make $MAKEOPTS fs/ioctl.o 2>&1 | tail -5
           ls -l out/fs/ioctl.o && echo "IOCTL_OK ${{ matrix.ver }}"
+          echo "== assert locks.c SEEK_END hook placement =="
+          awk '/^\tcase SEEK_END:/ { s++; inside=1; next } /^\t(case |default:)/ { inside=0 }
+               /nm_lock_eof\(filp\)/ { n++; if (!inside) bad=1 }
+               END { exit !(s >= 1 && n == s && !bad) }' fs/locks.c || {
+            echo "FATAL: a SEEK_END case in fs/locks.c has no nm_lock_eof() hook for ${{ matrix.ver }} -- a lock range there is measured from the module's i_size"; exit 1; }
+          make $MAKEOPTS fs/locks.o 2>&1 | tail -5
+          ls -l out/fs/locks.o && echo "LOCKS_OK ${{ matrix.ver }}"
           aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -qw 'nm_fionread_isize' || {
             echo "FATAL: nm_fionread_isize is not a global in nomount.o for ${{ matrix.ver }}"; exit 1; }
+          for s in nm_fioqsize_bytes nm_lock_eof; do
+            aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -qw "$s" || {
+              echo "FATAL: $s is not a global in nomount.o for ${{ matrix.ver }}"; exit 1; }
+          done
 
           echo "== compile fs/proc/task_mmu.o =="
           make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
