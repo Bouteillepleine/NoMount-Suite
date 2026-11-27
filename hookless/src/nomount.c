@@ -1173,6 +1173,10 @@ static void nomount_hijacked_evict_inode(struct inode *inode)
     }
 }
 
+/* A caller an added name is hidden from never reaches it by name: revalidate refuses the
+ * walk. What reaches the inode's ops is a handle it got while served (an fd from zygote or a
+ * provider, a cwd), and stock answers every read through a live handle. So metadata reads
+ * answer as served; open, permission and the writes still refuse. */
 static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *info)
 {
     return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) && !nm_info_served(info);
@@ -1255,9 +1259,106 @@ static int nm_open(struct inode *inode, struct file *file)
     return 0;
 }
 
+/* An fd opened by a caller the rule serves and used by one it does not: zygote reopens its
+ * kept fds as root before it drops to the app's uid, and a provider hands its fds over. Stat
+ * answers per caller and gave the stock file while the bytes followed the opener (eo-6). Such
+ * a reader gets a stock file of its own, opened on first use and dropped with the fd. */
+struct nm_alt {
+    struct hlist_node node;
+    struct file *outer, *alt;
+    struct rcu_head rcu;
+};
+static DEFINE_HASHTABLE(nm_alt_tbl, 6);
+static DEFINE_SPINLOCK(nm_alt_lock);
+static atomic_t nm_alt_n = ATOMIC_INIT(0);
+
+/* Safe without a reference: only nm_release() drops an entry, and the caller holds the fd. */
+static struct file *nm_alt_find(struct file *outer)
+{
+    struct nm_alt *a;
+    struct file *f = NULL;
+
+    rcu_read_lock();
+    hash_for_each_possible_rcu(nm_alt_tbl, a, node, (unsigned long)outer)
+        if (a->outer == outer) {
+            f = a->alt;
+            break;
+        }
+    rcu_read_unlock();
+    return f;
+}
+
+static struct file *nm_alt_for_caller(struct file *file, bool may_open)
+{
+    struct nm_inode_info *info = file_inode(file)->i_private;
+    struct file *real = file->private_data, *alt;
+    struct nm_alt *a, *e;
+    struct path *stock;
+
+    if (!info || !real)
+        return NULL;
+    stock = nm_stock_for_caller(info);
+    if (likely(!stock) || file_inode(real) == d_backing_inode(stock->dentry))
+        return NULL;
+    alt = atomic_read(&nm_alt_n) ? nm_alt_find(file) : NULL;
+    if (alt)
+        return alt;
+    if (!may_open)
+        return ERR_PTR(-EAGAIN);
+    a = kmalloc(sizeof(*a), GFP_KERNEL);
+    if (!a)
+        return ERR_PTR(-ENOMEM);
+    alt = dentry_open(stock, O_RDONLY | O_LARGEFILE, file->f_cred);
+    if (IS_ERR(alt)) {
+        kfree(a);
+        return alt;
+    }
+    a->outer = file;
+    a->alt = alt;
+    spin_lock(&nm_alt_lock);
+    hash_for_each_possible(nm_alt_tbl, e, node, (unsigned long)file)
+        if (e->outer == file)
+            break;
+    if (e) {
+        struct file *won = e->alt;
+
+        spin_unlock(&nm_alt_lock);
+        fput(alt);
+        kfree(a);
+        return won;
+    }
+    hash_add_rcu(nm_alt_tbl, &a->node, (unsigned long)file);
+    atomic_inc(&nm_alt_n);
+    spin_unlock(&nm_alt_lock);
+    return alt;
+}
+
+static void nm_alt_drop(struct file *outer)
+{
+    struct nm_alt *a;
+
+    if (!atomic_read(&nm_alt_n))
+        return;
+    spin_lock(&nm_alt_lock);
+    hash_for_each_possible(nm_alt_tbl, a, node, (unsigned long)outer)
+        if (a->outer == outer)
+            break;
+    if (a) {
+        hash_del_rcu(&a->node);
+        atomic_dec(&nm_alt_n);
+    }
+    spin_unlock(&nm_alt_lock);
+    if (a) {
+        fput(a->alt);
+        kfree_rcu(a, rcu);
+    }
+}
+
 static int nm_release(struct inode *inode, struct file *file)
 {
     struct file *real_file = file->private_data;
+
+    nm_alt_drop(file);
     if (real_file) {
         fput(real_file);
         file->private_data = NULL;
@@ -1328,6 +1429,15 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
     }
 
+    if (S_ISREG(file_inode(file)->i_mode)) {
+        struct file *alt = nm_alt_for_caller(file, true);
+
+        if (IS_ERR(alt))
+            return PTR_ERR(alt);
+        if (alt)
+            real_file = alt;
+    }
+
     /* erofs (and overlay over it) has no holes: DATA/HOLE are generic_file_llseek's, not
      * the module file's. A caller served stock asks the stock file itself. */
     if ((whence == SEEK_DATA || whence == SEEK_HOLE) &&
@@ -1377,8 +1487,14 @@ static bool nm_takes_dontcache(struct file *file, struct file *real_file)
 static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
     struct file *real_file = iocb->ki_filp->private_data;
+    struct file *alt;
 
     if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
+    alt = nm_alt_for_caller(iocb->ki_filp, !(iocb->ki_flags & IOCB_NOWAIT));
+    if (IS_ERR(alt))
+        return PTR_ERR(alt);
+    if (alt)
+        real_file = alt;
 #ifdef FOP_DONTCACHE
     /* The tables take RWF_DONTCACHE so f2fs victims answer like stock; others refuse here. */
     if (unlikely(iocb->ki_flags & IOCB_DONTCACHE) && !nm_takes_dontcache(iocb->ki_filp, real_file))
@@ -1417,8 +1533,26 @@ static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
 static int nm_mmap(struct file *file, struct vm_area_struct *vma)
 {
     struct file *real_file = file->private_data;
+    struct file *alt;
 
     if (!real_file) return -ENODEV;
+    alt = nm_alt_for_caller(file, true);
+    if (IS_ERR(alt))
+        return PTR_ERR(alt);
+    if (alt) {
+        /* The stock file's own mapping, as overlayfs maps its real file: maps then names
+         * the stock file and the pages are the stock bytes this reader gets from read(). */
+        if (!alt->f_op->mmap)
+            return -ENODEV;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+        vma_set_file(vma, alt);
+#else
+        get_file(alt);
+        fput(vma->vm_file);
+        vma->vm_file = alt;
+#endif
+        return alt->f_op->mmap(alt, vma);
+    }
     return generic_file_readonly_mmap(file, vma);
 }
 
@@ -1546,6 +1680,12 @@ static ssize_t nm_splice_read(struct file *in, loff_t *ppos, struct pipe_inode_i
                               size_t len, unsigned int flags)
 {
     struct file *real_file = in->private_data;
+    struct file *alt = nm_alt_for_caller(in, true);
+
+    if (IS_ERR(alt))
+        return PTR_ERR(alt);
+    if (alt)
+        real_file = alt;
     if (!real_file || !real_file->f_op->splice_read) return -EINVAL;
     return real_file->f_op->splice_read(real_file, ppos, pipe, len, flags);
 }
@@ -1617,12 +1757,7 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct inode *v_i
 
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-    struct inode *inode = d_backing_inode(dentry);
     const struct super_operations *orig;
-
-    if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
-        unlikely(nm_hidden_from_caller(inode->i_private)))
-        return -ENOENT;
 
     orig = nm_orig_sop(dentry->d_sb);
     if (orig && orig->statfs)
@@ -1702,7 +1837,6 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     struct path *stock;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     stock = nm_stock_for_caller(info);
     if (unlikely(stock)) {
         struct inode *si = d_backing_inode(stock->dentry);
@@ -2885,7 +3019,6 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
     (void)query_flags;
 #endif
     if (unlikely(!info)) return -EIO;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     {
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
@@ -3073,8 +3206,6 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     if (unlikely(!info || !info->r_path.dentry))
         return ERR_PTR(-EIO);
 
-    if (unlikely(nm_hidden_from_caller(info)))
-        return ERR_PTR(-ENOENT);
     stock = nm_stock_for_caller(info);
     if (unlikely(stock)) {
         struct inode *si = d_backing_inode(stock->dentry);
@@ -3100,7 +3231,6 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     struct inode *real_inode;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (unlikely((info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
         return -EOPNOTSUPP;
     {
@@ -3494,7 +3624,6 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         int r;
 
         if (unlikely(!info)) return -ENODATA;
-        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
         stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             full = nm_full_xattr_name(proxy, name, &alloc);
@@ -3954,8 +4083,6 @@ static int nm_fileattr_get(struct dentry *dentry, nm_fattr_t *fa)
 
     if (unlikely(!info))
         return -ENOIOCTLCMD;
-    if (unlikely(nm_hidden_from_caller(info)))
-        return -ENOENT;
     if (info->s_path.dentry) {
         src = &info->s_path;
     } else if (S_ISLNK(inode->i_mode)) {
@@ -8185,14 +8312,15 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
     *ino = info->v_ino;
 }
 
+/* The fs/xattr.c hook. security.* is answered by the LSM before any handler of ours, so it
+ * refused a hidden caller there; that caller now only reaches the inode through a handle it
+ * got while served, and reads through one answer as served (see nm_hidden_from_caller()).
+ * Kept because the integration patch calls it. */
 bool nm_inode_hidden_from_caller(const struct inode *inode);
 bool nm_inode_hidden_from_caller(const struct inode *inode)
 {
-    if (unlikely(!inode))
-        return false;
-    if (inode->i_op != &nm_file_iops && inode->i_op != &nm_dir_iops)
-        return false;
-    return nm_hidden_from_caller(inode->i_private);
+    (void)inode;
+    return false;
 }
 
 /* The fs/ioctl.c FIONREAD hook (hookless/patches/nomount_fionread_*.patch). FIONREAD answers
@@ -8212,6 +8340,12 @@ loff_t nm_fionread_isize(struct file *filp, struct inode *inode)
     real = READ_ONCE(filp->private_data);
     if (!real || !file_inode(real))
         return i_size_read(inode);
+    {
+        struct path *stock = nm_stock_for_caller(inode->i_private);
+
+        if (stock && d_backing_inode(stock->dentry))
+            return i_size_read(d_backing_inode(stock->dentry));
+    }
     return i_size_read(file_inode(real));
 }
 
