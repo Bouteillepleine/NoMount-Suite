@@ -16,14 +16,19 @@
 - [LKM] No 6.18 module ships until one is built against its KMI; a 6.18 kernel needs NoMount built in.
 - [LKM] After a kernel update within the same KMI, the module loads instead of staying down until a reinstall.
 - [LKM] Directories it adds to an overlay partition are numbered next to their stock siblings, as the built-in engine does.
+- [LKM] A module that does not load leaves every candidate tried and the kernel's reason in boot.log, and loading the copy kept from before an update is logged as a warning naming both builds.
 - [Suite] The card no longer says "not fully measured" when nothing on the ghost list is the cloak's own.
 - [Suite] Two quick reboots in a row no longer park the Suite.
 
-## v1.3.218 — engine v36 · 1.36.6 ([engine] lines need a rebuilt kernel; the LKM zip carries them)
+## v1.3.218 — engine v36 · 1.36.6 ([engine] lines need a rebuilt kernel; the LKM zip carries them except FIONREAD)
 
-- [engine] Replaced files answer FIONREAD with the size the caller reads, and a hidden app's lookup no longer shows them as "(deleted)" in other apps' maps.
-- [engine] Directories the engine takes over list, seek and report file flags like stock ones.
-- [LKM] Every module now carries symbol versions, so a kernel it was not built for refuses it instead of loading it, and the 6.18 module loads on 6.18 GKI kernels.
+- [LKM] ⚠ The 6.12 and 6.18 modules in this release load on no GKI kernel: their symbol versions match no 6.12 or 6.18 kernel. Use v1.3.219.
+- [engine] Replaced files answer FIONREAD with the size the caller reads (built-in kernels only), and a hidden app's lookup no longer shows them as "(deleted)" in other apps' maps.
+- [engine] Directories the engine takes over list and report file flags like stock ones.
+- [engine] Fixed a kernel oops an app could reach by reading fdinfo on /product overlays.
+- [LKM] No longer panics the kernel when it loads on 5.10 and 5.15 GKI (since v1.3.207), or on rmmod of a hide=0 build. The 6.1 and 6.6 modules now carry symbol versions, as the 5.10 and 5.15 ones did.
+- [Suite] The bootloop guard now parks the Suite when loading the engine module panics the phone.
+- [Suite] An app with a DenyList profile is no longer concealed from itself (getpriority on its own uid answered ESRCH).
 - [Suite] A shared-storage export says in WITHHELD.txt what it left out.
 - [WebUI] Copied reports no longer name hidden apps.
 
