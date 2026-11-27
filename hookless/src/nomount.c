@@ -7060,6 +7060,48 @@ static void nm_sample_child_file(struct nomount_rule *rule)
     kfree(ctx);
 }
 
+/* Whether a caller other than root can create entries here. A caller a rule hides finds an
+ * added name absent but cannot create it: the engine's dentry holds the name for everyone,
+ * so O_CREAT or mkdir would fail ENOENT where stock creates (engine-oracles-11). */
+static bool nm_dir_open_to_users(const struct inode *di, const struct vfsmount *mnt)
+{
+    if (!di || IS_RDONLY(di) || (mnt->mnt_flags & MNT_READONLY))
+        return false;
+    return !uid_eq(di->i_uid, GLOBAL_ROOT_UID) || (di->i_mode & 0022);
+}
+
+/* The real directory an added path's first missing component would be created in. */
+static bool nm_pure_dest_open(const char *vpath)
+{
+    char *anc = kstrdup(vpath, GFP_KERNEL);
+    struct path ap;
+    bool open = false;
+    char *sl;
+
+    if (!anc)
+        return false;
+    while ((sl = strrchr(anc, '/')) != NULL) {
+        if (sl == anc)
+            sl[1] = '\0';
+        else
+            *sl = '\0';
+        if (kern_path(anc, LOOKUP_FOLLOW, &ap) == 0) {
+            struct inode *ai = d_backing_inode(ap.dentry);
+            bool ours = ai && (ai->i_op == &nm_dir_iops || ai->i_op == &nm_file_iops);
+
+            if (!ours)
+                open = nm_dir_open_to_users(ai, ap.mnt);
+            path_put(&ap);
+            if (!ours)
+                break;
+        }
+        if (sl == anc)
+            break;
+    }
+    kfree(anc);
+    return open;
+}
+
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, const struct nm_uid_scope *scope)
 {
     struct nomount_rule *rule;
@@ -7104,6 +7146,14 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
         struct kstat kst;
         rule->flags |= NM_FLAG_SHADOWS_STOCK;
+        /* A merged directory serves the module's own children as added names. */
+        if ((rule->flags & NM_FLAG_IS_DIR) && !is_whiteout &&
+            nm_dir_open_to_users(d_backing_inode(v_path_struct.dentry), v_path_struct.mnt)) {
+            nm_warn("not merging %s: non-root callers can create entries in it\n", nm_get_vpath(rule));
+            path_put(&v_path_struct);
+            nm_free_rule(rule);
+            return ERR_PTR(-EPERM);
+        }
         if ((rule->flags & NM_FLAG_WHITEOUT) &&
             S_ISDIR(d_backing_inode(v_path_struct.dentry)->i_mode))
             rule->flags |= NM_FLAG_IS_DIR;
@@ -7168,6 +7218,12 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     } else {
         struct kstat sib;
 
+        if (!is_whiteout && nm_pure_dest_open(nm_get_vpath(rule))) {
+            nm_warn("not adding %s: non-root callers can create entries where it goes\n",
+                    nm_get_vpath(rule));
+            nm_free_rule(rule);
+            return ERR_PTR(-EPERM);
+        }
         if (nm_find_sibling_meta(nm_get_vpath(rule), &sib,
                                  rule->v_ctx, &rule->v_ctx_len, &rule->v_mapdev,
                                  &rule->v_cap) == 0) {
