@@ -4551,10 +4551,13 @@ static struct inode *nm_shadowed_inode(struct inode *inode)
 #define nm_for_each_child(c, p) list_for_each_entry(c, &(p)->d_subdirs, d_child)
 #endif
 
-/* A cached child of @parent that the engine did not make, referenced. */
-static struct dentry *nm_stock_child(struct dentry *parent)
+#define NM_OVL_SAMPLE 16
+
+/* Up to NM_OVL_SAMPLE cached children of @parent the engine did not make, referenced. */
+static int nm_stock_children(struct dentry *parent, struct dentry **out)
 {
-    struct dentry *c, *found = NULL;
+    struct dentry *c;
+    int n = 0;
 
     spin_lock(&parent->d_lock);
     nm_for_each_child(c, parent) {
@@ -4562,27 +4565,44 @@ static struct dentry *nm_stock_child(struct dentry *parent)
         if (c->d_inode && c->d_inode->i_sb == parent->d_sb && !nm_is_own_inode(c->d_inode) &&
             !d_unhashed(c)) {
             dget_dlock(c);
-            found = c;
+            out[n++] = c;
         }
         spin_unlock(&c->d_lock);
-        if (found)
+        if (n == NM_OVL_SAMPLE)
             break;
     }
     spin_unlock(&parent->d_lock);
-    return found;
+    return n;
 }
 
-/* A stock handle to copy: a real child of the directory the engine's own path starts in,
- * so the layer uuid is one its stock siblings carry (the directory itself sits in the
- * layer it originates from, which no stock child of /product/priv-app shares), else that
- * directory. Returns the encoder's type, the handle's length in @len, and in @kept whether
- * it came from a child (worth keeping: the directory is only a stand-in until one is cached). */
+/* Overlay's handle for @inode if it has the erofs-lower shape we rewrite: its length, else 0. */
+static int nm_ovl_encode_checked(const struct export_operations *orig, struct inode *inode,
+                                 u32 *buf, int *type)
+{
+    u8 *b = (u8 *)buf;
+    int o, l = NM_OVL_FH_MAX / 4;
+
+    *type = orig->encode_fh(inode, buf, &l, NULL);
+    o = *type == NM_OVL_FILEID_V1 ? 3 : *type == NM_OVL_FILEID_V0 ? 0 : -1;
+    if (o < 0 || l > NM_OVL_FH_MAX / 4 || l * 4 < o + NM_OVL_FB_HDR + 12 ||
+        b[o] != 0 || b[o + 1] != 0xfb || b[o + 2] != NM_OVL_FB_HDR + 12 ||
+        b[o + 4] != NM_FILEID_INO64_GEN)
+        return 0;
+    return o + b[o + 2];
+}
+
+/* A stock handle to copy, from the directory the engine's own path starts in: the layer most
+ * of its sampled real children sit in. The directory's own handle names the layer it
+ * originates from, which no stock child of /product/priv-app shares; the first cached child
+ * put 140 injected overlays in a layer two stock ones use. The directory itself only when no
+ * child is cached. Returns the encoder's type, the length in @len, and in @kept whether it
+ * came from children (worth keeping: the directory is a stand-in until some are cached). */
 static int nm_ovl_template(struct inode *inode, u32 *tpl, int *len, bool *kept,
                            const struct export_operations *orig)
 {
-    struct dentry *d, *p, *c = NULL;
-    u8 *b = (u8 *)tpl;
-    int i, o, ret = FILEID_INVALID, l = NM_OVL_FH_MAX / 4;
+    struct dentry *d, *p, *c[NM_OVL_SAMPLE];
+    u32 cand[NM_OVL_FH_MAX / 4];
+    int i, n, ret = FILEID_INVALID, best = 0;
 
     d = d_find_alias(inode);
     for (i = 0; d && i < 16; i++) {
@@ -4600,17 +4620,45 @@ static int nm_ovl_template(struct inode *inode, u32 *tpl, int *len, bool *kept,
         dput(d);
         return FILEID_INVALID;
     }
-    c = nm_stock_child(d);
-    *kept = c != NULL;
-    ret = orig->encode_fh(d_inode(c ? c : d), tpl, &l, NULL);
-    dput(c);
+    n = nm_stock_children(d, c);
+    *kept = false;
+    {
+        /* Each distinct header+uuid seen, how often, and the first child that carried it. */
+        u8 key[NM_OVL_SAMPLE][3 + NM_OVL_FB_HDR];
+        u8 cnt[NM_OVL_SAMPLE], first[NM_OVL_SAMPLE];
+        int ns = 0, j;
+
+        for (i = 0; i < n; i++) {
+            int typ, kl, l = nm_ovl_encode_checked(orig, d_inode(c[i]), cand, &typ);
+
+            if (!l)
+                continue;
+            kl = (typ == NM_OVL_FILEID_V1 ? 3 : 0) + NM_OVL_FB_HDR;
+            for (j = 0; j < ns; j++)
+                if (!memcmp(key[j], cand, kl))
+                    break;
+            if (j == ns) {
+                memset(key[ns], 0, sizeof(key[ns]));
+                memcpy(key[ns], cand, kl);
+                first[ns] = i;
+                cnt[ns++] = 0;
+            }
+            if (++cnt[j] > cnt[best])
+                best = j;
+        }
+        if (ns) {
+            *len = nm_ovl_encode_checked(orig, d_inode(c[first[best]]), tpl, &ret);
+            *kept = *len != 0;
+        }
+        for (i = 0; i < n; i++)
+            dput(c[i]);
+    }
+    if (!*kept) {
+        *len = nm_ovl_encode_checked(orig, d_inode(d), tpl, &ret);
+        if (!*len)
+            ret = FILEID_INVALID;
+    }
     dput(d);
-    o = ret == NM_OVL_FILEID_V1 ? 3 : ret == NM_OVL_FILEID_V0 ? 0 : -1;
-    if (o < 0 || l > NM_OVL_FH_MAX / 4 || l * 4 < o + NM_OVL_FB_HDR + 12 ||
-        b[o] != 0 || b[o + 1] != 0xfb || b[o + 2] != NM_OVL_FB_HDR + 12 ||
-        b[o + 4] != NM_FILEID_INO64_GEN)
-        return FILEID_INVALID;
-    *len = o + b[o + 2];
     return ret;
 }
 
