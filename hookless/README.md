@@ -38,7 +38,7 @@ dmesg | grep -E 'NoMount.*ino(seed|place)'
 These fire once per rule and a mount pass installs hundreds, so leave the flag
 off outside an investigation.
 
-One patch covers 4.9 through 6.18. Its own header explains why the anchors are
+One integration patch, plus one of the two size-hook patches, covers 4.9 through 6.18. Its own header explains why the anchors are
 where they are, and `.github/workflows/hookless-matrix.yml` applies it to
 all ten trees on every push that touches `hookless/` and asserts each hunk lands inside the function it
 is meant for. Read the matrix run rather than hand-checking the result.
@@ -121,7 +121,7 @@ check this paragraph used to ask for is the matrix's job now.
 The `@@` line numbers in the patch are nominal, which is worth knowing before
 re-anchoring: the `show_map_vma()` anchor sits at line 365 (4.9), 366 (4.14),
 365 (4.19), 366 (5.4), 337 (5.10), 290 (5.15), 293 (6.1), 409 (6.6), 550
-(6.12) and 478 (6.18), against a header that says `@@ -400`. `patch` finds it
+(6.12) and 549 (6.18, android17-6.18), against a header that says `@@ -400`. `patch` finds it
 anyway because the context is unique, not because it is near.
 
 ## A drift this repository cannot catch
