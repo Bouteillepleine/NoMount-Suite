@@ -134,6 +134,20 @@ jobs:
             exit 1
           fi
 
+          # Only gh's "release not found" means there is none. Any other failure (a rate limit,
+          # a 5xx) read as none too, and with a draft present `create` then made a second release.
+          release_state() {
+            if _rs=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+                       -q 'if .isDraft then "draft" else "published" end' 2>/tmp/rv.err); then
+              echo "$_rs"
+            elif grep -qi 'release not found' /tmp/rv.err; then
+              echo none
+            else
+              echo "FATAL: could not read the state of release $TAG: $(cat /tmp/rv.err)" >&2
+              return 1
+            fi
+          }
+
           if [ "${DRY_RUN:-}" = 'true' ]; then
             echo "DRY RUN - nothing published."
             echo "  tag        : $TAG"
@@ -144,10 +158,11 @@ jobs:
             else
               echo "  tag state  : already at $GITHUB_SHA"
             fi
-            case "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null || echo none)" in
-              true)  echo "  release    : a draft; a real run would fill it and publish it" ;;
-              false) echo "  release    : already published; a real run keeps it if the zips match, else refuses" ;;
-              *)     echo "  release    : does not exist yet, would be created" ;;
+            dstate=$(release_state)
+            case "$dstate" in
+              draft)     echo "  release    : a draft; a real run would fill it and publish it" ;;
+              published) echo "  release    : already published; a real run keeps it if the zips match, else refuses" ;;
+              *)         echo "  release    : does not exist yet, would be created" ;;
             esac
             exit 0
           fi
@@ -190,23 +205,41 @@ jobs:
             printf '```\n'
           } >> /tmp/notes.md
 
+          # A staged draft can hold files this run did not build. Published beside ours they
+          # carry no hash, and Verify's `sha256sum -c` checks only the names it is given.
+          drop_extra_assets() {
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' |
+            while IFS= read -r _a; do
+              case "$_a" in "$(basename "$zip")"|"$(basename "$lkmzip")"|SHA256SUMS) continue ;; esac
+              echo "::warning::removing $_a from $TAG: this run did not build it"
+              gh release delete-asset "$TAG" "$_a" --repo "$GITHUB_REPOSITORY" --yes
+            done
+          }
+
           # A draft has no tag yet, so its asset URLs 404 for every device; a published
           # version is immutable, so its assets are only re-sent when that is asked for.
-          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
-                    -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          # A new release starts as a draft: Verify reads it back before anyone can fetch it,
+          # and only then does the next step make it public. A run that dies in between
+          # leaves a draft, which the next run fills (tag.yml treats a draft as unreleased).
+          state=$(release_state)
           case "$state" in
             none)
               gh release create "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS \
                 --repo "$GITHUB_REPOSITORY" \
+                --draft \
                 --target "$GITHUB_SHA" \
                 --title "NoMount Suite $TAG" \
                 --notes-file /tmp/notes.md
+              state=draft
               ;;
             draft)
-              echo "release $TAG is a draft: filling it and publishing it at $GITHUB_SHA"
+              echo "release $TAG is a draft: filling it at $GITHUB_SHA"
               gh release upload "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+              drop_extra_assets
+              # A hand-staged draft may carry its own title and the prerelease flag, and a
+              # prerelease is never releases/latest, which README.md links to.
               gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md \
-                --draft=false --target "$GITHUB_SHA"
+                --title "NoMount Suite $TAG" --target "$GITHUB_SHA" --prerelease=false
               ;;
             published)
               _pre="$(mktemp -d)"
@@ -225,7 +258,9 @@ jobs:
               elif [ "${REPLACE_ASSETS:-}" = 'true' ]; then
                 echo "::warning::$TAG is published with different zips; replacing them because replace_assets is set"
                 gh release upload "$TAG" "$zip" "$lkmzip" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+                drop_extra_assets
                 gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
+                state=replaced
               else
                 echo "FATAL: $TAG is already published with different zips, and a published version is immutable." >&2
                 echo "       To retry only the update.json step, use 'Re-run failed jobs' on the run that built it." >&2
@@ -240,7 +275,8 @@ jobs:
       # the thing itself. Within one run they are built from the same dist/, but
       # nothing re-read them afterwards -- so an interleaved manual upload could
       # leave all three disagreeing and the run still green. Read them back.
-      - name: Verify the published assets match the notes
+      # A new release is still a draft here, readable with this token and nobody else's.
+      - name: Verify the release assets match the notes
         if: ${{ inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -259,9 +295,39 @@ jobs:
             [ -n "${d:-}" ] || continue
             grep -qF "$d  $n" "$v/notes.md" || { echo "::$lvl::release notes do not carry the published hash of $n ($d)"; bad=1; }
           done < "$v/SHA256SUMS"
+          # sha256sum -c passes files it is not given, so the asset list is compared too.
+          have=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | sort)
+          want=$({ awk 'NF {print $2}' "$v/SHA256SUMS"; echo SHA256SUMS; } | sort)
+          if [ "$have" != "$want" ]; then
+            echo "::$lvl::$TAG carries assets SHA256SUMS does not list: $(printf '%s\n' "$have" | grep -vxF -f <(printf '%s\n' "$want") | tr '\n' ' ')"
+            bad=1
+          fi
           [ "$bad" = 0 ] || [ "$lvl" = warning ] || exit 1
-          echo "published assets, SHA256SUMS and notes all agree"
+          if [ "$bad" = 0 ]; then
+            echo "release assets, SHA256SUMS and notes all agree"
+          else
+            echo "assets match SHA256SUMS; the kept release differs from it as warned above"
+          fi
           rm -rf "$v"
+
+      - name: Make it public
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$(cat /tmp/publish-state)" != draft ]; then
+            echo "release $TAG was already public ($(cat /tmp/publish-state))"
+            exit 0
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
+          [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)" = false ] || {
+            echo "::error::$TAG is still a draft after publishing it"; exit 1; }
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
+          [ "$tag_sha" = "$GITHUB_SHA" ] || {
+            echo "::error::$TAG was published at $tag_sha, not at this build's $GITHUB_SHA"; exit 1; }
+          echo "release $TAG is public at $GITHUB_SHA"
 
       - name: Point update.json at this release
         if: ${{ inputs.dry_run != 'true' }}
