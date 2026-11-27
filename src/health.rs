@@ -269,6 +269,16 @@ impl Fingerprint {
         out.push(if self.guard == "armed" {
             mk("boot guard armed", Verdict::Pass, self.guard.clone())
                 .meaning("The Suite is enabled; no boot-failure guard has tripped.")
+        } else if self.guard == "not-armed" {
+            mk("boot guard armed", Verdict::Warn, self.guard.clone())
+                .meaning(
+                    "The bootloop guard did not arm this boot, so the boot scripts injected \
+                     nothing and skipped every later pass: its counter in /data/adb/nomount \
+                     could not be written, and a full /data is the usual cause. boot.log says \
+                     why; free some space and reboot. Before the first reboot after an \
+                     install this is expected, as nothing has armed it yet.",
+                )
+                .owner("the state directory")
         } else {
             mk("boot guard armed", Verdict::Fail, self.guard.clone())
                 .meaning(
@@ -354,6 +364,21 @@ fn pick_probe_uid(installed: &[(String, u32)], live_hidden: &[u32]) -> Option<u3
         .filter(|u| *u >= crate::blocklist::FIRST_APP_APPID)
         .filter(|u| !hidden.contains(&crate::blocklist::appid(*u)))
         .min()
+}
+
+const GUARD_TS: &str = "/data/adb/nomount/guard.ts";
+
+/// lib.sh's nm_guard_armed: guard.ts holds the boot_id of the boot that armed the guard. No
+/// `disabled` alone is not armed: a boot whose counter could not be written injected nothing.
+/// An unreadable boot_id cannot tell, and the shell counts that as armed too.
+fn guard_state(tripped: bool, guard_ts: Option<String>, boot_id: Option<String>) -> &'static str {
+    if tripped {
+        return "tripped";
+    }
+    match boot_id.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) if guard_ts.as_deref().map(str::trim) != Some(b) => "not-armed",
+        _ => "armed",
+    }
 }
 
 fn count_mounts_split() -> Option<(usize, usize)> {
@@ -712,7 +737,11 @@ pub fn gather() -> Fingerprint {
         (Ok(v), Some(inst)) => pick_probe_uid(inst, v),
         _ => None,
     };
-    let guard = if crate::mount::guard_tripped() { "tripped" } else { "armed" };
+    let guard = guard_state(
+        crate::mount::guard_tripped(),
+        fs::read_to_string(GUARD_TS).ok(),
+        fs::read_to_string("/proc/sys/kernel/random/boot_id").ok(),
+    );
     let split = count_mounts_split();
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1960,6 +1989,21 @@ rules=3
         let mut bad = fp("v30", 12);
         bad.consistency = "mismatch:/system/etc/x(root=12 app=ENOENT)".into();
         assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
+    }
+
+    #[test]
+    fn the_guard_is_armed_only_when_this_boot_armed_it() {
+        let id = || Some("4f1c\n".to_string());
+        assert_eq!(guard_state(false, id(), id()), "armed");
+        assert_eq!(guard_state(false, Some("old-boot\n".into()), id()), "not-armed");
+        assert_eq!(guard_state(false, None, id()), "not-armed");
+        assert_eq!(guard_state(true, id(), id()), "tripped");
+        assert_eq!(guard_state(false, None, None), "armed", "as nm_guard_armed: unknown boot_id");
+        let mut f = fp("v36", 3);
+        f.guard = "not-armed".into();
+        assert_eq!(verdict_of(&f, "boot guard armed"), "WARN");
+        f.guard = "armed".into();
+        assert_eq!(verdict_of(&f, "boot guard armed"), "PASS");
     }
 
     #[test]

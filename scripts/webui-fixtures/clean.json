@@ -1,7 +1,7 @@
 {
  "__about": "Synthetic WebUI fixtures: hand-made, no device data. See webui-harness.py.",
  "__synthetic": true,
- "__commands": "32e054619310",
+ "__commands": "63e372930d6c",
  "abi": {
   "out": "arm64-v8a",
   "rc": 0,
@@ -109,6 +109,11 @@
  },
  "bootcount": {
   "out": "0",
+  "rc": 0,
+  "err": ""
+ },
+ "guardts": {
+  "out": "1",
   "rc": 0,
   "err": ""
  },

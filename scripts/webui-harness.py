@@ -112,6 +112,9 @@ COMMANDS = {
                 'case "$p" in ""|*[!0-9]*) exit 0 ;; esac; [ -d /proc/$p ] && echo 1',
     "isolated": "NM_BIN=%s/nm %s/nomount uid isolated" % (BIN, BIN),
     "bootcount": "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi",
+    "guardts": ('b=$(/system/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null); '
+                '[ -z "$b" ] || [ "$(/system/bin/cat /data/adb/nomount/guard.ts 2>/dev/null)" = "$b" ] '
+                '&& echo 1 || echo 0'),
     "modprop": "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop "
                "2>/dev/null",
 }
@@ -150,6 +153,7 @@ window.ksu = {
     else if (has('uid isolated')) key = 'isolated';
     else if (has('whiteout list')) key = 'whiteoutlist';
     else if (has('nomount/bootcount')) key = 'bootcount';
+    else if (has('nomount/guard.ts')) key = 'guardts';
     else if (has('modules_update/meta-nomount/module.prop')) key = 'modprop';
     else if (has('pm list packages')) key = 'pkgs';
     else if (has('absorbed.list')) key = 'absorbedlist';

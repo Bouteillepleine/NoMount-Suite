@@ -422,6 +422,11 @@
       "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi"
     );
     const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
+    // Armed is lib.sh's nm_guard_armed: guard.ts names this boot. No `disabled` alone also
+    // reads that way on a boot whose counter could not be written, which injected nothing.
+    const ar = await exec('b=$(/system/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null); ' +
+      '[ -z "$b" ] || [ "$(/system/bin/cat /data/adb/nomount/guard.ts 2>/dev/null)" = "$b" ] ' +
+      "&& echo 1 || echo 0");
     if (dr.errno !== 0) {
       $("gchip").textContent = "?";
       $("gstate").textContent = "Unknown · could not read the guard";
@@ -443,6 +448,12 @@
       $("gstate").textContent = "Tripped · disabled"; $("gdot").className = "dot info"; $("rearm").classList.remove("u-hide");
       expandCard("cardGuard");
       expandCard("incidentcard");
+    } else if (ar.errno !== 0) {
+      $("gstate").textContent = "Unknown · could not read the guard"; $("gdot").className = "dot";
+      $("rearm").classList.add("u-hide");
+    } else if (ar.stdout.trim() !== "1") {
+      $("gstate").textContent = "Not armed this boot · boot.log says why"; $("gdot").className = "dot";
+      $("rearm").classList.add("u-hide");
     } else {
       $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").classList.add("u-hide");
     }
