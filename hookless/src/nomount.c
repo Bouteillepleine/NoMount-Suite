@@ -572,18 +572,16 @@ static bool nm_emit_dots(struct file *file, struct dir_context *ctx,
     return true;
 }
 
-/* True when it found a child to offer, emitted or not. A pass that found none must leave
- * the caller's position where the real filesystem left it: every stock fs keeps f_pos
- * unchanged on a getdents that returns nothing. */
-/* The injected tail of a listing, after the real entries, at base + 1 + k where k counts
+/* The injected tail of a listing, after the real entries, at base + gap + k where k counts
  * only the children THIS caller may see. Child ids are shared by every caller, so packing
- * by id left a gap wherever a sibling hidden from the reader sat (eo-7 c).
+ * by id left a gap wherever a sibling hidden from the reader sat (eo-7 c). gap comes from
+ * nm_tail_gap(): 0 where the real pass handed out dense indices, 1 elsewhere.
  *
  * True when it found a child to offer, emitted or not. A pass that found none leaves the
  * caller's position where the real filesystem left it: every stock fs keeps f_pos unchanged
  * on a getdents that returns nothing. */
 static bool nm_emit_tail(struct dir_context *ctx, struct nomount_dir_node *dir_node,
-                         loff_t base, bool real_pass_done)
+                         loff_t base, bool real_pass_done, loff_t gap)
 {
     struct nomount_child_node *child;
     loff_t skip = 0, k = 0;
@@ -591,8 +589,8 @@ static bool nm_emit_tail(struct dir_context *ctx, struct nomount_dir_node *dir_n
     int id = 0;
 
     if (!dir_node || !base) return false;
-    if (ctx->pos > base && ctx->pos <= base + NM_POS_HEADROOM)
-        skip = ctx->pos - base - 1;
+    if (ctx->pos >= base + gap && ctx->pos <= base + NM_POS_HEADROOM)
+        skip = ctx->pos - base - gap;
 
     if (!atomic_inc_not_zero(&dir_node->refcount)) return false;
 
@@ -626,11 +624,11 @@ static bool nm_emit_tail(struct dir_context *ctx, struct nomount_dir_node *dir_n
             continue;
         }
         any = true;
-        ctx->pos = base + 1 + k;
+        ctx->pos = base + gap + k;
         if (!dir_emit(ctx, name, nlen, fino, dt))
             break;
         k++;
-        ctx->pos = base + 1 + k;
+        ctx->pos = base + gap + k;
     }
 
     nm_dir_node_put(dir_node);
@@ -638,9 +636,9 @@ static bool nm_emit_tail(struct dir_context *ctx, struct nomount_dir_node *dir_n
 }
 
 static inline bool nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node,
-                                                 bool real_pass_done)
+                                                 bool real_pass_done, loff_t gap)
 {
-    return dir_node && nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->real_eof), real_pass_done);
+    return dir_node && nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->real_eof), real_pass_done, gap);
 }
 
 static void nm_mirror_blocks(const struct nm_inode_info *info, struct inode *v_inode,
@@ -653,6 +651,16 @@ static inline bool nm_victim_is_overlay(const struct super_block *sb)
 #else
     return false;
 #endif
+}
+
+/* A merged overlay directory hands out dense indices, 0..N-1 ending at N, so stock's
+ * terminal d_off is the entry count and the tail has to start AT N: one position of gap
+ * there made the terminal entries + 1 (engine-oracles-5). Sparse spaces -- erofs byte
+ * offsets, ext4/f2fs hash cookies, an overlay directory passed through to one layer --
+ * keep the gap that separates the tail from the fs's own positions. */
+static inline loff_t nm_tail_gap(const struct super_block *sb, loff_t base, loff_t max_pos)
+{
+    return (nm_victim_is_overlay(sb) && base > 0 && max_pos + 1 == base) ? 0 : 1;
 }
 
 /* Whether a caller the rule does not serve may share the injected inode, with its ops
@@ -959,7 +967,9 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     }
 
     if (unlikely(nm_is_virtual_pos(pdir, ctx->pos))) {
-        nomount_emit_virtual_children(ctx, pdir, true);
+        nomount_emit_virtual_children(ctx, pdir, true,
+                                      nm_tail_gap(file_inode(file)->i_sb, READ_ONCE(pdir->real_eof),
+                                                  READ_ONCE(pdir->max_real_pos)));
         goto out;
     }
 
@@ -986,7 +996,9 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
         if (base && start > base && start != READ_ONCE(pdir->real_end))
             goto out;
         nm_publish_real_eof(pdir, ctx->pos);
-        nomount_emit_virtual_children(ctx, pdir, true);
+        nomount_emit_virtual_children(ctx, pdir, true,
+                                      nm_tail_gap(file_inode(file)->i_sb, READ_ONCE(pdir->real_eof),
+                                                  READ_ONCE(pdir->max_real_pos)));
     }
     goto out;
 
@@ -2930,6 +2942,21 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     return real_inode->i_op->fiemap(real_inode, fieinfo, start, len);
 }
 
+/* The position space the tail continues: the file this listing proxies (the stock directory
+ * for a uid-blocked caller), or, for a virtual directory with nothing behind it, its own
+ * dots at 0 and 1 on the victim's superblock. */
+static loff_t nm_dir_tail_gap(struct file *file, struct file *real_file,
+                              const struct nomount_dir_node *d, bool stock_space)
+{
+    if (!real_file)
+        return nm_victim_is_overlay(file_inode(file)->i_sb) ? 0 : 1;
+    if (stock_space)
+        return nm_tail_gap(file_inode(real_file)->i_sb, READ_ONCE(d->stock_eof),
+                           READ_ONCE(d->max_stock_pos));
+    return nm_tail_gap(file_inode(real_file)->i_sb, READ_ONCE(d->real_eof),
+                       READ_ONCE(d->max_real_pos));
+}
+
 static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
 {
     struct nm_inode_info *info = file_inode(file)->i_private;
@@ -2970,12 +2997,14 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
 
     if (stock_space) {
         if (unlikely(nm_is_stock_virtual_pos(dir_node, ctx->pos))) {
-            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true);
+            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true,
+                         nm_dir_tail_gap(file, real_file, dir_node, true));
             return 0;
         }
     } else if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
         nomount_emit_virtual_children(ctx, dir_node,
-                                      !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
+                                      !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)),
+                                      nm_dir_tail_gap(file, real_file, dir_node, false));
         return 0;
     }
 
@@ -3005,7 +3034,8 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
             if (sbase && start > sbase && start != READ_ONCE(dir_node->stock_end))
                 return res;
             nm_publish_stock_eof(dir_node, ctx->pos);
-            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true);
+            nm_emit_tail(ctx, dir_node, READ_ONCE(dir_node->stock_eof), true,
+                         nm_dir_tail_gap(file, real_file, dir_node, true));
             return res;
         }
         eof = READ_ONCE(dir_node->real_eof);
@@ -3021,7 +3051,8 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     }
 
     nomount_emit_virtual_children(ctx, dir_node,
-                                  !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
+                                  !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)),
+                                  nm_dir_tail_gap(file, real_file, dir_node, false));
     return res;
 }
 

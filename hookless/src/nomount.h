@@ -344,19 +344,6 @@ static inline bool nm_is_virtual_pos(const struct nomount_dir_node *d, loff_t po
     return eof && pos > eof && pos > mx && pos <= eof + NM_POS_HEADROOM;
 }
 
-static inline loff_t nm_pack_pos(const struct nomount_dir_node *d, int id)
-{
-    return READ_ONCE(d->real_eof) + 1 + id;
-}
-
-static inline int nm_unpack_pos(const struct nomount_dir_node *d, loff_t pos)
-{
-    loff_t id = pos - READ_ONCE(d->real_eof) - 1;
-
-    if (id < 0 || id > NM_POS_HEADROOM) return -1;
-    return (int)id;
-}
-
 static inline void nm_note_real_pos(struct nomount_dir_node *d, loff_t pos)
 {
     if (!d || pos <= 0 || pos > (loff_t)(S64_MAX - NM_POS_HEADROOM)) return;
