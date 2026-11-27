@@ -2167,6 +2167,11 @@ mod tests {
                  and the prune",
             ),
             (
+                "run: sh tests/guard-reset.sh",
+                "the bootloop guard across simulated boots: a late-pass panic still parks the \
+                 Suite, two quick reboots do not",
+            ),
+            (
                 "run: node scripts/webui-loadorder.js",
                 "the WebUI load-order and built-command gate: every part's dependencies and \
                  whether each command it assembles still parses as shell",

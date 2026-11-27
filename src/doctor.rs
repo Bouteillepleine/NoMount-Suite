@@ -77,6 +77,8 @@ struct GhostSample {
     unknown: usize,
     absent: usize,
     own_absent: usize,
+    // Sampled entries no engine rule covers, left-out ones included.
+    own_listed: usize,
     visible: Vec<String>,
     leaked: Vec<String>,
 }
@@ -150,6 +152,20 @@ fn ghost_sample_findings(
             detail: format!(
                 "none of the {probed} sampled path(s) could be probed (the test process could \
                  not run), so the cloak was not tested on this kernel. This is not a pass.{why}"
+            ),
+        });
+    } else if s.own_absent == 0 && s.own_listed.saturating_sub(s.no_control) == 0 {
+        // Nothing the cloak alone covers exists here, root included: there is no coverage of
+        // its own to test, which is not the same as failing to test it.
+        f.push(Finding {
+            level: Level::NotApplicable,
+            check: "ghost cloak has nothing of its own here",
+            detail: format!(
+                "every sampled path ({}) is one the engine already hides from {who}, and no \
+                 listed path that only the cloak covers exists on this device, so there is \
+                 nothing of its own to test. A path in /data/adb/nomount/ghostpaths that no rule \
+                 covers is measured here.{left_out}",
+                s.absent
             ),
         });
     } else if s.own_absent == 0 {
@@ -1785,6 +1801,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 };
                 for p in order.into_iter().take(SAMPLE) {
                     let own = !engine_targets.contains(p);
+                    sample.own_listed += usize::from(own);
                     // The control: an entry root cannot see either (a match pattern such as
                     // `/adb/modules/`) is absent for everyone and proves nothing about the cloak.
                     if own {
@@ -2101,7 +2118,15 @@ mod tests {
     use crate::nm::LiveKind;
 
     fn sample(attempted: usize, no_control: usize, unknown: usize, absent: usize, own: usize) -> GhostSample {
-        GhostSample { attempted, no_control, unknown, absent, own_absent: own, ..GhostSample::default() }
+        GhostSample {
+            attempted,
+            no_control,
+            unknown,
+            absent,
+            own_absent: own,
+            own_listed: own + no_control,
+            ..GhostSample::default()
+        }
     }
 
     fn rows(s: &GhostSample) -> Vec<(Level, &'static str, String)> {
@@ -2124,15 +2149,27 @@ mod tests {
     }
 
     #[test]
-    fn only_engine_paths_left_after_the_control_is_still_untested_coverage() {
+    fn nothing_of_the_cloaks_own_existing_is_not_applicable_not_unmeasured() {
+        // The default install: two engine paths and the /adb/modules/ pattern no one can see.
         let r = rows(&sample(3, 1, 0, 2, 0));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Level::NotApplicable);
+        assert_eq!(r[0].1, "ghost cloak has nothing of its own here");
+        assert!(r[0].2.contains("1 listed entry exists for no one here"), "{}", r[0].2);
+        // Only engine paths on the list.
+        let r = rows(&sample(2, 0, 0, 2, 0));
+        assert_eq!(r[0].0, Level::NotApplicable);
+        let r = rows(&sample(1, 1, 0, 0, 0));
+        assert_eq!(r[0].0, Level::NotApplicable);
+    }
+
+    #[test]
+    fn a_cloak_only_path_that_exists_but_could_not_be_probed_stays_unmeasured() {
+        let s = GhostSample { own_listed: 1, ..sample(3, 0, 1, 2, 0) };
+        let r = rows(&s);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(r[0].0, Level::Unmeasured);
         assert_eq!(r[0].1, "ghost cloak coverage not tested");
-        let r = rows(&sample(1, 1, 0, 0, 0));
-        assert_eq!(r[0].0, Level::Unmeasured);
-        assert_eq!(r[0].1, "ghost cloak coverage not tested");
-        assert!(r[0].2.starts_with("none of the cloak's own paths"), "{}", r[0].2);
     }
 
     #[test]

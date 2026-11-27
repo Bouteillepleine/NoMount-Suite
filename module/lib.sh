@@ -4,6 +4,7 @@ umask 077
 
 NMDIR=/data/adb/nomount
 BOOTLOG="$NMDIR/boot.log"
+: "${NM_BOOT_ID:=/proc/sys/kernel/random/boot_id}"
 
 # The boot log always; /dev/kmsg only if asked for.
 #
@@ -335,7 +336,7 @@ nm_guard_arm() {
         fi
     done
     unset _f
-    _gid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    _gid=$(cat "$NM_BOOT_ID" 2>/dev/null)
     if [ -n "$_gid" ] && [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gid" ]; then
         unset _gid
         return 0
@@ -352,7 +353,7 @@ nm_guard_arm() {
     if [ -n "$_gid" ]; then
         echo "$_gid" > "$NMDIR/guard.ts" 2>/dev/null
     else
-        cat /proc/sys/kernel/random/boot_id > "$NMDIR/guard.ts" 2>/dev/null
+        cat "$NM_BOOT_ID" > "$NMDIR/guard.ts" 2>/dev/null
     fi
     unset _gid
     sync 2>/dev/null
@@ -390,8 +391,32 @@ nm_guard_bump() {
     return 2
 }
 
+# The foreground passes returned: this boot stops counting. The late reload/absorb at +45 s
+# installs rules too, so it holds the count again while it runs, and only after this
+# marker - a slow foreground would otherwise clear the hold it had just taken.
+nm_guard_fg_done() {
+    rm -f "$NMDIR/bootcount"
+    : > "$NMDIR/.guard_fg"
+}
+
+# $1 = this boot's count, read before the late pass was forked.
+nm_guard_late_hold() {
+    _gw=0
+    while [ ! -e "$NMDIR/.guard_fg" ] && [ "$_gw" -lt "${NM_GUARD_FG_WAIT:-60}" ]; do
+        sleep 2
+        _gw=$((_gw + 1))
+    done
+    unset _gw
+    case "$1" in ''|*[!0-9]*|0) return 0 ;; esac
+    echo "$1" > "$NMDIR/bootcount"
+}
+
+nm_guard_late_release() {
+    rm -f "$NMDIR/bootcount" "$NMDIR/.guard_fg"
+}
+
 nm_guard_armed() {
-    _gab=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    _gab=$(cat "$NM_BOOT_ID" 2>/dev/null)
     [ -n "$_gab" ] || return 0
     [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gab" ]
 }

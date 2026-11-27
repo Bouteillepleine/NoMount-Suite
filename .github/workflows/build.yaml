@@ -72,6 +72,9 @@ jobs:
       - name: Module shell tests
         run: sh tests/lkm-load.sh
 
+      - name: Bootloop guard across simulated boots
+        run: sh tests/guard-reset.sh
+
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
 

@@ -155,15 +155,18 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     else
         nmlog "$_ab"
     fi
+    _guard_count=$(cat "$NMDIR/bootcount" 2>/dev/null)
+    rm -f "$NMDIR/.guard_fg"
     (
         sleep 45
+        nm_guard_late_hold "$_guard_count"
         # This subshell owns the counter reset, because it outlives the foreground script
         # by ~40s and installs rules the whole way: resetting downstream of boot_completed
         # but upstream of THIS pass left every crash in it happening at count 1, and the
         # count back at 0 from the moment the crash became possible.
         _late_reset() {
             [ "$booted" = "1" ] || return 0
-            rm -f "$NMDIR/bootcount"
+            nm_guard_late_release
             nmlog "boot completed and the late passes returned, guard counter reset"
         }
         [ -e "$NMDIR/disabled" ] && { _late_reset; exit 0; }
@@ -267,11 +270,15 @@ fi
 # and the only way out was recovery. The passes above have all returned by this line.
 #
 # The 45s late reload/absorb has NOT: it is still queued when this line is reached, and it
-# writes the rule table too. So when that subshell was forked it owns the reset and does it
-# as its last act; this line covers only the boots where it never started.
+# writes the rule table too. So this boot stops counting here, and that subshell counts it
+# again only while its own passes run (nm_guard_late_hold), then clears it. Holding the
+# count from boot to the end of the late pass parked a healthy Suite after two reboots.
 if [ "$booted" = "1" ] && [ "${_late_owns_reset:-0}" != 1 ]; then
     rm -f "$NMDIR/bootcount"
     nmlog "boot completed and the late passes returned, guard counter reset"
+elif [ "$booted" = "1" ]; then
+    nm_guard_fg_done
+    nmlog "foreground passes returned, guard counter cleared (the late pass holds it while it runs)"
 fi
 
 # inotifyd EXECS its handler, so the handler carries the exec bit -- and the installer's
