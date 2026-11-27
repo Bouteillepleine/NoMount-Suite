@@ -202,7 +202,8 @@
     // watcher that could not exec its handler swallowed every later request for the rest
     // of the boot, invisibly: touch exits 0 either way and the loop's only exit was
     // exhaustion, 100s of spinner per tap.
-    if ((await exec("/system/bin/rm -f " + CHECK_REQ + "; /system/bin/touch " + CHECK_REQ)).errno !== 0) {
+    if ((await exec("/system/bin/rm -f " + CHECK_REQ + " /data/adb/nomount/request/declined; " +
+                    "/system/bin/touch " + CHECK_REQ)).errno !== 0) {
       return null;
     }
     for (let i = 0; i < CHECK_WAIT_TRIES; i++) {
@@ -213,10 +214,13 @@
       }
       // checkwatch.sh removes the request as its first act, well before it starts the
       // check, so a request still on disk after ~5s means nothing is consuming requests.
-      // Give up on the watcher now instead of at try 200; the caller falls back.
-      if (i === 9 &&
-          ((await exec("[ -e " + CHECK_REQ + " ] && echo 1")).stdout || "").trim() === "1") {
-        return null;
+      // One it consumed and refused leaves `declined` instead. Either way the caller falls
+      // back now, not at try 200.
+      if (i < 10) {
+        const st = ((await exec("[ -e " + CHECK_REQ + " ] && echo pending; " +
+          "/system/bin/cat /data/adb/nomount/request/declined 2>/dev/null")).stdout || "").trim();
+        if (st && st !== "pending") return null;
+        if (i === 9 && st === "pending") return null;
       }
     }
     return null;

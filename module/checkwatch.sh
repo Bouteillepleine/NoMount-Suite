@@ -21,18 +21,24 @@ NMLOG_TAG=checkwatch
 
 REQ="$NMDIR/request/check"
 [ -e "$REQ" ] || exit 0
+# The request is gone once it is read, so a refusal has to say so: the page otherwise waits
+# out the whole check budget for a report that is never coming. Its event names no `check`.
+_decline() {
+    printf '%s\n' "$1" > "$NMDIR/request/declined" 2>/dev/null
+    exit 0
+}
 # $NMDIR is 0700 root:root so only root can have put it there, but a request is a command
 # to run the engine binary: verify rather than assume.
 _own=$(stat -c '%u:%g' "$REQ" 2>/dev/null)
 rm -f "$REQ"
 if [ "$_own" != "0:0" ]; then
     nmlog "⚠ check request was owned by $_own, not root - ignored"
-    exit 0
+    _decline "the request was not root's"
 fi
 
-[ -e "$NMDIR/disabled" ] && exit 0
+[ -e "$NMDIR/disabled" ] && _decline "the Suite is parked by the bootloop guard"
 nm_set_bin
-[ -x "$BIN" ] || exit 0
+[ -x "$BIN" ] || _decline "the engine binary is missing or not executable"
 
 LOCK=$NMDIR/.checkwatch.lock
 if [ -f "$LOCK" ]; then

@@ -14,7 +14,10 @@ nm_boot_log_rotate
 # an integer. If anything now owns it, checkwatch.sh's `kill -0` says the holder is alive,
 # the noclobber acquire fails and every WebUI check request is dropped in silence for the
 # whole boot -- which sends the page back to running the check in its own seccomp context.
-rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" 2>/dev/null
+# .checkwatch.pid the same way: only an armed boot's service.sh rewrites it, and on a parked
+# one the page took a live reused pid for the watcher.
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" \
+    "$NMDIR/.checkwatch.pid" 2>/dev/null
 nm_consume_stash
 nm_lkm_boot_load
 if [ -n "$KSU" ] || [ -n "$APATCH" ]; then

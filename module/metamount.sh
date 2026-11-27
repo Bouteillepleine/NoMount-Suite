@@ -21,7 +21,8 @@ nm_state_dir_repair
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" 2>/dev/null
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" \
+    "$NMDIR/.checkwatch.pid" 2>/dev/null
 
 nm_consume_stash
 
