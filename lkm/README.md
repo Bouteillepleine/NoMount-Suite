@@ -163,19 +163,17 @@ names them per KMI, and CI checks each list against a pinned GKI build's
 no symbol of its own there (inlined or renamed, so kallsyms has nothing to bind)
 fails too.
 
-**4. FIONREAD can still report the module file's size.** `ioctl(fd, FIONREAD)`
-answers `i_size` off the file's inode before any file operation runs, and an
-engine inode is shared by every caller. A caller the rule hides it from reads
-the stock file through that inode, so FIONREAD gives it the module file's size:
-a hidden app saw `/system/etc/hosts` as 56 bytes by `fstat` and `read`, and
-2,033,224 by FIONREAD. The in-tree build answers FIONREAD through
-`nm_fionread_isize()` from a hook in `fs/ioctl.c`. This variant has nowhere to
-hook: on the OP15 6.12.69 build `do_vfs_ioctl()` is inlined into
-`__arm64_sys_ioctl` and has no symbol, and a probe on the syscall would have to
-rewrite the value after it was copied to user memory. It shows only to a caller
-hidden from a rule, on a file whose module copy differs in size from stock.
+**4. Raw size readers.** `ioctl(fd, FIONREAD)` answers `i_size` off the file's
+inode before any file operation runs, and an engine inode is shared by every
+caller, so a caller the rule hides it from was told the module file's size: a
+hidden app saw `/system/etc/hosts` as 56 bytes by `fstat` and `read`, and
+2,033,224 by FIONREAD. The in-tree build answers through `nm_fionread_isize()`
+from a hook in `fs/ioctl.c`. Here `do_vfs_ioctl()` is inlined into
+`__arm64_sys_ioctl` (OP15 6.12.69 and the GKI builds), so the size guard probes
+the syscall itself: its entry declines every other command, and its return
+handler rewrites the int FIONREAD just wrote with the size the caller is served.
 
-Two more readers of the raw inode are covered here by the size guard
+Two more readers of the raw inode are covered by the same guard
 (`nm_size_probes.c`) instead of a hook. A byte-range lock with `l_whence =
 SEEK_END` (`fcntl(F_GETLK)` and friends) measures from `i_size`, and FIOQSIZE
 (root and shell only) reports `i_blocks`. Kretprobes on `fcntl_getlk()` and
